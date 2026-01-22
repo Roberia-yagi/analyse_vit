@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=gen10_kangaroos
-#SBATCH --output=/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit/results/slurm/%x_%j.out
-#SBATCH --error=/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit/results/slurm/%x_%j.err
 #SBATCH --chdir=/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit
-#SBATCH --partition=gpu-a100,gpu-a100-preempt,gpu-l40s-preempt,gpu-a100-short,gpu-h100
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=128G
@@ -11,10 +8,11 @@
 
 set -euo pipefail
 
-# --chdir sets the working directory for the job.
+source /home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit/scripts/sbatch/utils/race_guard.sh
+
 PROJECT_ROOT="$(pwd -P)"
-RUN_SCRIPT="$PROJECT_ROOT/scripts/sh/generate_10_kangaroos.sh"
-PY_MODULE="analyse_vit.rare_colour_bias.flux_sam_composite"
+RUN_SCRIPT="$PROJECT_ROOT/scripts/sh/generate_images.sh"
+PY_MODULE="analyse_vit.rare_colour_bias.image_generation.generate_images"
 
 find_latest_run_dir() {
   local base_dir="$1"
@@ -42,17 +40,12 @@ copy_sources() {
   fi
 }
 
-# Activate local virtual environment
 source .venv/bin/activate
-
-# Avoid buffered logs in Slurm output
 export PYTHONUNBUFFERED=1
-
-mkdir -p results/slurm
 
 bash "$RUN_SCRIPT"
 
-run_root="$(find_latest_run_dir "$PROJECT_ROOT/results" || true)"
+run_root="$(find_latest_run_dir "$PROJECT_ROOT/results/image_generation" || true)"
 if [[ -n "$run_root" ]]; then
   copy_sources "$run_root" "$RUN_SCRIPT" "$PY_MODULE"
 else

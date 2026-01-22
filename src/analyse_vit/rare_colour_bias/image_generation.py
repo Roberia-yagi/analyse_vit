@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import inspect
 import json
 import logging
@@ -42,6 +43,8 @@ class SamParams:
     morph_kernel_px: int
     min_area_frac: float
     max_area_frac: float
+    lang_sam_box_threshold: float
+    lang_sam_text_threshold: float
 
 
 @dataclass
@@ -55,7 +58,7 @@ class CompositeParams:
 
 @dataclass
 class ColorParams:
-    target_hue_deg: float
+    target_hue_deg: Optional[float]
     min_saturation: float
 
 
@@ -65,6 +68,7 @@ class RunConfig:
     background_prompt: str
     base_prompt: str
     paired_prompt: str
+    object_name: Optional[str]
     base_prompt_elements_path: Optional[Path]
     paired_prompt_elements_path: Optional[Path]
     base_prompt_elements: Optional[Dict[str, str]]
@@ -82,6 +86,15 @@ class RunConfig:
     color: ColorParams
     device: str
     hf_token: Optional[str]
+
+
+@dataclass(frozen=True)
+class RunDirs:
+    root: Path
+    inputs: Path
+    masks: Path
+    outputs: Path
+    meta: Path
 
 
 @dataclass
@@ -118,6 +131,24 @@ _COLOR_TRANSFORMS: Dict[str, ColorTransform] = {
     "grey": ColorTransform(hue_deg=None, desaturate=True, value_scale=0.6, value_lift=None),
     "black": ColorTransform(hue_deg=None, desaturate=True, value_scale=0.25, value_lift=None),
     "white": ColorTransform(hue_deg=None, desaturate=True, value_scale=None, value_lift=0.25),
+}
+
+_PIPELINE_DEFAULTS: Dict[str, Dict[str, float]] = {
+    "flux": {"num_inference_steps": 50, "guidance_scale": 3.5},
+    "sd3": {"num_inference_steps": 30, "guidance_scale": 5.0},
+    "qwen": {"num_inference_steps": 50, "guidance_scale": 4.0},
+}
+
+_MODEL_DEFAULTS: Dict[str, Dict[str, Dict[str, float]]] = {
+    "flux": {
+        "black-forest-labs/FLUX.1-dev": {"num_inference_steps": 50, "guidance_scale": 3.5},
+    },
+    "sd3": {
+        "stabilityai/stable-diffusion-3.5-large": {"num_inference_steps": 30, "guidance_scale": 5.0},
+    },
+    "qwen": {
+        "Qwen/Qwen-Image-2512": {"num_inference_steps": 50, "guidance_scale": 4.0},
+    },
 }
 
 
@@ -223,8 +254,26 @@ def _get_hf_token(explicit_token: Optional[str]) -> Optional[str]:
     return None
 
 
-def _setup_logger(output_dir: Path) -> logging.Logger:
-    logger = logging.getLogger(f"flux_sam_composite.{output_dir.name}")
+def _prepare_run_dirs(output_dir: Path) -> RunDirs:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    inputs_dir = output_dir / "inputs"
+    masks_dir = output_dir / "masks"
+    outputs_dir = output_dir / "outputs"
+    meta_dir = output_dir / "meta"
+    for path in (inputs_dir, masks_dir, outputs_dir, meta_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    return RunDirs(
+        root=output_dir,
+        inputs=inputs_dir,
+        masks=masks_dir,
+        outputs=outputs_dir,
+        meta=meta_dir,
+    )
+
+
+def _setup_logger(run_dir: Path, log_dir: Optional[Path] = None) -> logging.Logger:
+    log_dir = log_dir or run_dir
+    logger = logging.getLogger(f"flux_sam_composite.{run_dir.name}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
@@ -233,7 +282,7 @@ def _setup_logger(output_dir: Path) -> logging.Logger:
         logger.removeHandler(handler)
         handler.close()
 
-    file_handler = logging.FileHandler(output_dir / "run.log")
+    file_handler = logging.FileHandler(log_dir / "run.log")
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
@@ -275,6 +324,22 @@ def _np_to_pil_rgba(array: np.ndarray) -> Image.Image:
 
 def _save_image(image: Image.Image, path: Path) -> None:
     image.save(path)
+
+
+def _load_required_rgb_image(path: Path) -> Image.Image:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing generated image: {path}")
+    return Image.open(path).convert("RGB")
+
+
+def _resolve_run_input(run_dirs: RunDirs, filename: str) -> Path:
+    candidate = run_dirs.inputs / filename
+    if candidate.exists():
+        return candidate
+    fallback = run_dirs.root / filename
+    if fallback.exists():
+        return fallback
+    return candidate
 
 
 def _filter_kwargs_for_callable(fn, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -394,6 +459,16 @@ def _resolve_color_transform(color_name: str, fallback_hue_deg: Optional[float])
     raise ValueError(
         f"Unknown color name '{color_name}'. Use a supported name or a numeric hue in degrees."
     )
+
+
+def _resolve_generation_defaults(pipeline: str, model_id: str) -> Tuple[int, float]:
+    model_defaults = _MODEL_DEFAULTS.get(pipeline, {}).get(model_id)
+    if model_defaults is not None:
+        return int(model_defaults["num_inference_steps"]), float(model_defaults["guidance_scale"])
+    pipe_defaults = _PIPELINE_DEFAULTS.get(pipeline)
+    if pipe_defaults is None:
+        raise ValueError(f"Unknown pipeline type: {pipeline}")
+    return int(pipe_defaults["num_inference_steps"]), float(pipe_defaults["guidance_scale"])
 
 
 def _apply_color_transform(
@@ -627,6 +702,56 @@ def _save_mask(mask: np.ndarray, path: Path) -> None:
     Image.fromarray(mask_u8, mode="L").save(path)
 
 
+def _resolve_torch_dtype(name: str):
+    import torch
+
+    if name == "bf8":
+        for attr in ("float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2", "float8_e5m2fnuz"):
+            dtype = getattr(torch, attr, None)
+            if dtype is None:
+                continue
+            orig_dtype = torch.get_default_dtype()
+            try:
+                torch.set_default_dtype(dtype)
+            except Exception:
+                try:
+                    torch.set_default_dtype(orig_dtype)
+                except Exception:
+                    pass
+                continue
+            else:
+                try:
+                    torch.set_default_dtype(orig_dtype)
+                except Exception:
+                    pass
+            try:
+                torch.empty(1, dtype=dtype)
+            except Exception:
+                continue
+            return dtype
+        logging.getLogger(__name__).warning(
+            "bf8 requested but float8 is unsupported in this torch build; falling back to bfloat16."
+        )
+        return torch.bfloat16
+    dtype_map = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }
+    return dtype_map.get(name, torch.bfloat16)
+
+
+def _release_torch_cuda() -> None:
+    try:
+        import torch
+    except Exception:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        if hasattr(torch.cuda, "ipc_collect"):
+            torch.cuda.ipc_collect()
+
+
 def _load_text2image_pipeline(
     pipeline_type: str,
     model_id: str,
@@ -646,12 +771,7 @@ def _load_text2image_pipeline(
     else:
         raise ValueError(f"Unknown pipeline type: {pipeline_type}")
 
-    dtype_map = {
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-        "float32": torch.float32,
-    }
-    dtype = dtype_map.get(torch_dtype, torch.bfloat16)
+    dtype = _resolve_torch_dtype(torch_dtype)
     if device == "cpu":
         dtype = torch.float32
 
@@ -671,6 +791,7 @@ def _load_text2image_pipeline(
         pipe = PipelineClass.from_pretrained(model_id, **kwargs)
     except Exception as exc:
         hints = [f"Failed to load pipeline ({pipeline_type})."]
+        hints.append(f"Original error: {type(exc).__name__}: {exc}")
         if token is None:
             hints.append(
                 "If the model is gated, pass --hf-token or set HF_TOKEN/HUGGINGFACE_HUB_TOKEN."
@@ -679,6 +800,8 @@ def _load_text2image_pipeline(
             hints.append(
                 "local_files_only is enabled; ensure the model is cached or omit --flux-local-files-only."
             )
+        if torch_dtype == "bf8":
+            hints.append("bf8 was requested; if float8 is unsupported, try --torch-dtype bfloat16.")
         hints.append("You can also point --model-id to a local path or a public model.")
         raise RuntimeError(" ".join(hints)) from exc
     pipe.to(device)
@@ -719,12 +842,155 @@ def _generate_flux_image(
     return result.images[0]
 
 
+def _generate_flux_images_batch(
+    pipe,
+    prompts: Iterable[str],
+    seeds: Iterable[int],
+    width: int,
+    height: int,
+    steps: int,
+    guidance_scale: float,
+    max_sequence_length: int,
+    device: str,
+) -> list[Image.Image]:
+    import torch
+
+    prompt_list = list(prompts)
+    seed_list = list(seeds)
+    if len(prompt_list) != len(seed_list):
+        raise ValueError("Prompt and seed counts must match for batch generation.")
+    generators = [torch.Generator(device=device).manual_seed(seed) for seed in seed_list]
+    call_kwargs = {
+        "prompt": prompt_list,
+        "width": width,
+        "height": height,
+        "num_inference_steps": steps,
+        "guidance_scale": guidance_scale,
+        "max_sequence_length": max_sequence_length,
+        "generator": generators,
+    }
+    sig = inspect.signature(pipe.__call__)
+    if "true_cfg_scale" in sig.parameters:
+        call_kwargs["true_cfg_scale"] = guidance_scale
+        if guidance_scale > 1.0 and "negative_prompt" in sig.parameters:
+            call_kwargs.setdefault("negative_prompt", [""] * len(prompt_list))
+    call_kwargs = _filter_kwargs_for_callable(pipe.__call__, call_kwargs)
+    result = pipe(**call_kwargs)
+    images = list(result.images)
+    if len(images) != len(prompt_list):
+        raise RuntimeError("Batch generation returned an unexpected number of images.")
+    return images
+
+
 def _load_sam_predictor(checkpoint: Path, model_type: str, device: str):
     from segment_anything import SamPredictor, sam_model_registry
 
     sam = sam_model_registry[model_type](checkpoint=str(checkpoint))
     sam.to(device=device)
     return SamPredictor(sam)
+
+
+def _load_lang_sam_model(device: str):
+    from lang_sam import LangSAM
+
+    sig = inspect.signature(LangSAM)
+    if "device" in sig.parameters:
+        return LangSAM(device=device)
+    return LangSAM()
+
+
+def _coerce_numpy(array_like) -> Optional[np.ndarray]:
+    if array_like is None:
+        return None
+    if hasattr(array_like, "detach"):
+        array_like = array_like.detach().cpu().numpy()
+    return np.asarray(array_like)
+
+
+def _select_lang_sam_mask(
+    masks: np.ndarray,
+    scores: Optional[np.ndarray],
+    center_xy: Tuple[int, int],
+) -> Optional[np.ndarray]:
+    if masks.ndim == 4 and masks.shape[1] == 1:
+        masks = masks[:, 0]
+    if masks.ndim == 2:
+        masks = masks[None, :, :]
+    if masks.ndim != 3:
+        return None
+
+    if scores is not None:
+        scores = np.asarray(scores)
+        if scores.ndim == 0:
+            scores = None
+    if scores is not None and len(scores) == masks.shape[0]:
+        cx, cy = center_xy
+        center_hits = [masks[i, cy, cx] > 0.5 for i in range(masks.shape[0])]
+        if any(center_hits):
+            idx = int(np.argmax([scores[i] if center_hits[i] else -1.0 for i in range(len(scores))]))
+            return masks[idx]
+        idx = int(np.argmax(scores))
+        return masks[idx]
+
+    return _select_mask(masks, center_xy)
+
+
+def _predict_mask_lang_sam(
+    model,
+    image: Image.Image,
+    text_prompt: str,
+    box_threshold: float,
+    text_threshold: float,
+) -> Optional[np.ndarray]:
+    if not hasattr(model, "predict"):
+        return None
+    sig = inspect.signature(model.predict)
+    kwargs: dict[str, Any] = {}
+    if "box_threshold" in sig.parameters:
+        kwargs["box_threshold"] = box_threshold
+    if "text_threshold" in sig.parameters:
+        kwargs["text_threshold"] = text_threshold
+    images_arg: Any = image
+    texts_arg: Any = text_prompt
+    if "images_pil" in sig.parameters or "texts_prompt" in sig.parameters:
+        images_arg = [image]
+        texts_arg = [text_prompt]
+    output = model.predict(images_arg, texts_arg, **kwargs)
+
+    masks = None
+    scores = None
+    if isinstance(output, dict):
+        masks = output.get("masks") if output.get("masks") is not None else output.get("mask")
+        scores = output.get("scores") if output.get("scores") is not None else output.get("logits")
+    elif isinstance(output, list) and output and isinstance(output[0], dict):
+        first = output[0]
+        masks = first.get("masks") if first.get("masks") is not None else first.get("mask")
+        scores = (
+            first.get("mask_scores")
+            if first.get("mask_scores") is not None
+            else first.get("scores")
+            if first.get("scores") is not None
+            else first.get("logits")
+        )
+    elif isinstance(output, (list, tuple)):
+        for item in output:
+            if masks is None:
+                arr = _coerce_numpy(item)
+                if arr is not None and arr.ndim >= 2:
+                    masks = arr
+            if scores is None and isinstance(item, (list, tuple)):
+                scores = item
+
+    masks_np = _coerce_numpy(masks)
+    scores_np = _coerce_numpy(scores)
+    if masks_np is None:
+        return None
+    if masks_np.ndim == 2 and masks_np.shape != (image.height, image.width):
+        return None
+    if masks_np.ndim >= 3 and masks_np.shape[-2:] != (image.height, image.width):
+        return None
+    center_xy = (image.width // 2, image.height // 2)
+    return _select_lang_sam_mask(masks_np, scores_np, center_xy)
 
 
 def _predict_mask(
@@ -775,10 +1041,10 @@ def _predict_mask(
     return _select_mask(masks, (cx, cy))
 
 
-def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
+def _run_generation_stage(config: RunConfig, pipe=None):
     output_dir = config.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
-    logger = _setup_logger(output_dir)
+    run_dirs = _prepare_run_dirs(output_dir)
+    logger = _setup_logger(output_dir, run_dirs.meta)
 
     logger.info("Starting run %03d (seed offset=%d).", config.run_index, config.seed_offset)
 
@@ -805,15 +1071,12 @@ def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
         config.flux.max_sequence_length,
         config.device,
     )
-    _save_image(bg_image, output_dir / "bg.png")
+    _save_image(bg_image, run_dirs.inputs / "bg.png")
 
     prompt_real = config.base_prompt
     prompt_toy = config.paired_prompt
     logger.info("Using base prompt: %s", prompt_real)
     logger.info("Using paired prompt: %s", prompt_toy)
-
-    dominant_transform = _resolve_color_transform(config.dominant_color, None)
-    rare_transform = _resolve_color_transform(config.rare_color, config.color.target_hue_deg)
 
     logger.info("Generating anchor real object image.")
     real_anchor_image = _generate_flux_image(
@@ -827,7 +1090,7 @@ def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
         config.flux.max_sequence_length,
         config.device,
     )
-    _save_image(real_anchor_image, output_dir / "real_anchor.png")
+    _save_image(real_anchor_image, run_dirs.inputs / "real_anchor.png")
 
     logger.info("Generating anchor toy object image.")
     toy_anchor_image = _generate_flux_image(
@@ -841,34 +1104,175 @@ def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
         config.flux.max_sequence_length,
         config.device,
     )
-    _save_image(toy_anchor_image, output_dir / "toy_anchor.png")
+    _save_image(toy_anchor_image, run_dirs.inputs / "toy_anchor.png")
 
-    if predictor is None:
+    return pipe
+
+
+def _ensure_batch_compatible(run_configs: list[RunConfig]) -> RunConfig:
+    if not run_configs:
+        raise ValueError("No run configs provided for batch generation.")
+    base = run_configs[0]
+    for cfg in run_configs[1:]:
+        if cfg.device != base.device:
+            raise ValueError("Batch generation requires the same device for all runs.")
+        if cfg.flux != base.flux:
+            raise ValueError("Batch generation requires identical flux parameters for all runs.")
+    return base
+
+
+def _run_generation_stage_batch(run_configs: list[RunConfig], pipe=None):
+    base = _ensure_batch_compatible(run_configs)
+    if pipe is None:
+        base_dirs = _prepare_run_dirs(base.output_dir)
+        logger = _setup_logger(base.output_dir, base_dirs.meta)
+        logger.info("Loading text-to-image pipeline (%s).", base.flux.pipeline)
+        pipe = _load_text2image_pipeline(
+            base.flux.pipeline,
+            base.flux.model_id,
+            base.flux.torch_dtype,
+            base.device,
+            base.hf_token,
+            base.flux.local_files_only,
+        )
+
+    run_dirs_list: list[RunDirs] = []
+    for cfg in run_configs:
+        run_dirs = _prepare_run_dirs(cfg.output_dir)
+        run_dirs_list.append(run_dirs)
+        logger = _setup_logger(cfg.output_dir, run_dirs.meta)
+        logger.info(
+            "Starting run %03d (seed offset=%d) using batched generation.",
+            cfg.run_index,
+            cfg.seed_offset,
+        )
+
+    bg_prompts = [cfg.background_prompt for cfg in run_configs]
+    bg_seeds = [cfg.seed_bg for cfg in run_configs]
+    bg_images = _generate_flux_images_batch(
+        pipe,
+        bg_prompts,
+        bg_seeds,
+        base.flux.width,
+        base.flux.height,
+        base.flux.num_inference_steps,
+        base.flux.guidance_scale,
+        base.flux.max_sequence_length,
+        base.device,
+    )
+    for run_dirs, image in zip(run_dirs_list, bg_images):
+        _save_image(image, run_dirs.inputs / "bg.png")
+
+    real_prompts = [cfg.base_prompt for cfg in run_configs]
+    real_seeds = [cfg.seed_real for cfg in run_configs]
+    real_images = _generate_flux_images_batch(
+        pipe,
+        real_prompts,
+        real_seeds,
+        base.flux.width,
+        base.flux.height,
+        base.flux.num_inference_steps,
+        base.flux.guidance_scale,
+        base.flux.max_sequence_length,
+        base.device,
+    )
+    for run_dirs, image in zip(run_dirs_list, real_images):
+        _save_image(image, run_dirs.inputs / "real_anchor.png")
+
+    toy_prompts = [cfg.paired_prompt for cfg in run_configs]
+    toy_seeds = [cfg.seed_toy for cfg in run_configs]
+    toy_images = _generate_flux_images_batch(
+        pipe,
+        toy_prompts,
+        toy_seeds,
+        base.flux.width,
+        base.flux.height,
+        base.flux.num_inference_steps,
+        base.flux.guidance_scale,
+        base.flux.max_sequence_length,
+        base.device,
+    )
+    for run_dirs, image in zip(run_dirs_list, toy_images):
+        _save_image(image, run_dirs.inputs / "toy_anchor.png")
+
+    return pipe
+
+
+def _run_sam_stage(config: RunConfig, predictor=None, lang_sam_model=None) -> None:
+    output_dir = config.output_dir
+    run_dirs = _prepare_run_dirs(output_dir)
+    logger = _setup_logger(output_dir, run_dirs.meta)
+
+    logger.info("Starting SAM/composite stage for run %03d.", config.run_index)
+
+    bg_image = _load_required_rgb_image(_resolve_run_input(run_dirs, "bg.png"))
+    real_anchor_image = _load_required_rgb_image(_resolve_run_input(run_dirs, "real_anchor.png"))
+    toy_anchor_image = _load_required_rgb_image(_resolve_run_input(run_dirs, "toy_anchor.png"))
+
+    prompt_real = config.base_prompt
+    prompt_toy = config.paired_prompt
+    logger.info("Using base prompt: %s", prompt_real)
+    logger.info("Using paired prompt: %s", prompt_toy)
+    if config.sam.prompt_mode == "grounding":
+        if not config.object_name:
+            raise ValueError("--object-name is required when --sam-prompt-mode grounding is used.")
+        logger.info("Using object name for grounding SAM: %s", config.object_name)
+
+    dominant_transform = _resolve_color_transform(config.dominant_color, None)
+    rare_transform = _resolve_color_transform(config.rare_color, config.color.target_hue_deg)
+
+    if config.sam.prompt_mode == "grounding":
+        if lang_sam_model is None:
+            logger.info("Loading LangSAM model for text-guided masks.")
+            lang_sam_model = _load_lang_sam_model(config.device)
+    elif predictor is None:
         logger.info("Loading SAM predictor.")
         predictor = _load_sam_predictor(config.sam.checkpoint, config.sam.model_type, config.device)
 
     logger.info("Predicting real mask.")
-    real_mask_raw = _predict_mask(
-        predictor,
-        real_anchor_image,
-        config.sam.prompt_mode,
-        config.sam.box_ratio_w,
-        config.sam.box_ratio_h,
-    )
+    if config.sam.prompt_mode == "grounding":
+        real_mask_raw = _predict_mask_lang_sam(
+            lang_sam_model,
+            real_anchor_image,
+            config.object_name,
+            config.sam.lang_sam_box_threshold,
+            config.sam.lang_sam_text_threshold,
+        )
+        if real_mask_raw is None:
+            raise RuntimeError("LangSAM did not return a mask for the real prompt.")
+    else:
+        real_mask_raw = _predict_mask(
+            predictor,
+            real_anchor_image,
+            config.sam.prompt_mode,
+            config.sam.box_ratio_w,
+            config.sam.box_ratio_h,
+        )
     real_mask = _postprocess_mask(real_mask_raw, config.sam.morph_kernel_px)
 
     logger.info("Predicting toy mask.")
-    toy_mask_raw = _predict_mask(
-        predictor,
-        toy_anchor_image,
-        config.sam.prompt_mode,
-        config.sam.box_ratio_w,
-        config.sam.box_ratio_h,
-    )
+    if config.sam.prompt_mode == "grounding":
+        toy_mask_raw = _predict_mask_lang_sam(
+            lang_sam_model,
+            toy_anchor_image,
+            config.object_name,
+            config.sam.lang_sam_box_threshold,
+            config.sam.lang_sam_text_threshold,
+        )
+        if toy_mask_raw is None:
+            raise RuntimeError("LangSAM did not return a mask for the toy prompt.")
+    else:
+        toy_mask_raw = _predict_mask(
+            predictor,
+            toy_anchor_image,
+            config.sam.prompt_mode,
+            config.sam.box_ratio_w,
+            config.sam.box_ratio_h,
+        )
     toy_mask = _postprocess_mask(toy_mask_raw, config.sam.morph_kernel_px)
 
-    _save_mask(real_mask, output_dir / "real_mask.png")
-    _save_mask(toy_mask, output_dir / "toy_mask.png")
+    _save_mask(real_mask, run_dirs.masks / "real_mask.png")
+    _save_mask(toy_mask, run_dirs.masks / "toy_mask.png")
 
     sanity_checks: Dict[str, Any] = {}
     real_area = _mask_area_frac(real_mask)
@@ -912,8 +1316,8 @@ def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
         config.color.min_saturation,
     )
 
-    _save_image(_np_to_pil_rgb(real_dom_rgb), output_dir / "real_dom.png")
-    _save_image(_np_to_pil_rgb(toy_dom_rgb), output_dir / "toy_dom.png")
+    _save_image(_np_to_pil_rgb(real_dom_rgb), run_dirs.outputs / "real_dom.png")
+    _save_image(_np_to_pil_rgb(toy_dom_rgb), run_dirs.outputs / "toy_dom.png")
 
     logger.info("Applying rare color transformation.")
     real_rare_rgb = _apply_color_transform(
@@ -929,18 +1333,18 @@ def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
         config.color.min_saturation,
     )
 
-    _save_image(_np_to_pil_rgb(real_rare_rgb), output_dir / "real_rare.png")
-    _save_image(_np_to_pil_rgb(toy_rare_rgb), output_dir / "toy_rare.png")
+    _save_image(_np_to_pil_rgb(real_rare_rgb), run_dirs.outputs / "real_rare.png")
+    _save_image(_np_to_pil_rgb(toy_rare_rgb), run_dirs.outputs / "toy_rare.png")
 
     real_dom_rgba = np.dstack([real_dom_rgb, real_alpha])
     real_rare_rgba = np.dstack([real_rare_rgb, real_alpha])
     toy_dom_rgba = np.dstack([toy_dom_rgb, toy_alpha])
     toy_rare_rgba = np.dstack([toy_rare_rgb, toy_alpha])
 
-    _save_image(_np_to_pil_rgba(real_dom_rgba), output_dir / "real_dom_rgba.png")
-    _save_image(_np_to_pil_rgba(real_rare_rgba), output_dir / "real_rare_rgba.png")
-    _save_image(_np_to_pil_rgba(toy_dom_rgba), output_dir / "toy_dom_rgba.png")
-    _save_image(_np_to_pil_rgba(toy_rare_rgba), output_dir / "toy_rare_rgba.png")
+    _save_image(_np_to_pil_rgba(real_dom_rgba), run_dirs.outputs / "real_dom_rgba.png")
+    _save_image(_np_to_pil_rgba(real_rare_rgba), run_dirs.outputs / "real_rare_rgba.png")
+    _save_image(_np_to_pil_rgba(toy_dom_rgba), run_dirs.outputs / "toy_dom_rgba.png")
+    _save_image(_np_to_pil_rgba(toy_rare_rgba), run_dirs.outputs / "toy_rare_rgba.png")
 
     dom_rare_diff_real = _compute_outside_diff(real_dom_rgb, real_rare_rgb, real_mask)
     dom_rare_diff_toy = _compute_outside_diff(toy_dom_rgb, toy_rare_rgb, toy_mask)
@@ -976,10 +1380,10 @@ def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
     scene_toy_dom, toy_obj_mask = _apply_transform_and_composite(bg_rgb, toy_dom_rgba, toy_transform)
     scene_toy_rare, toy_obj_mask_rare = _apply_transform_and_composite(bg_rgb, toy_rare_rgba, toy_transform)
 
-    _save_image(_np_to_pil_rgb(scene_real_dom), output_dir / "scene_real_dom.png")
-    _save_image(_np_to_pil_rgb(scene_real_rare), output_dir / "scene_real_rare.png")
-    _save_image(_np_to_pil_rgb(scene_toy_dom), output_dir / "scene_toy_dom.png")
-    _save_image(_np_to_pil_rgb(scene_toy_rare), output_dir / "scene_toy_rare.png")
+    _save_image(_np_to_pil_rgb(scene_real_dom), run_dirs.outputs / "scene_real_dom.png")
+    _save_image(_np_to_pil_rgb(scene_real_rare), run_dirs.outputs / "scene_real_rare.png")
+    _save_image(_np_to_pil_rgb(scene_toy_dom), run_dirs.outputs / "scene_toy_dom.png")
+    _save_image(_np_to_pil_rgb(scene_toy_rare), run_dirs.outputs / "scene_toy_rare.png")
 
     scene_diff_real = _compute_outside_diff(scene_real_dom, scene_real_rare, real_obj_mask)
     scene_diff_toy = _compute_outside_diff(scene_toy_dom, scene_toy_rare, toy_obj_mask)
@@ -1005,6 +1409,7 @@ def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
         "background_prompt": config.background_prompt,
         "base_prompt": config.base_prompt,
         "paired_prompt": config.paired_prompt,
+        "object_name": config.object_name,
         "base_prompt_elements_json": str(config.base_prompt_elements_path)
         if config.base_prompt_elements_path
         else None,
@@ -1038,6 +1443,8 @@ def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
             "morph_kernel_px": config.sam.morph_kernel_px,
             "min_area_frac": config.sam.min_area_frac,
             "max_area_frac": config.sam.max_area_frac,
+            "lang_sam_box_threshold": config.sam.lang_sam_box_threshold,
+            "lang_sam_text_threshold": config.sam.lang_sam_text_threshold,
         },
         "color": asdict(config.color),
         "color_transforms": {
@@ -1062,10 +1469,20 @@ def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
         },
     }
 
-    with (output_dir / "meta.json").open("w", encoding="utf-8") as f:
+    with (run_dirs.meta / "meta.json").open("w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=True)
 
     logger.info("Run complete.")
+
+
+def run_pipeline(config: RunConfig, pipe=None, predictor=None, lang_sam_model=None) -> None:
+    pipe = _run_generation_stage(config, pipe=pipe)
+    if config.sam.prompt_mode == "grounding":
+        _run_sam_stage(config, predictor=None, lang_sam_model=lang_sam_model)
+    else:
+        if predictor is None:
+            predictor = _load_sam_predictor(config.sam.checkpoint, config.sam.model_type, config.device)
+        _run_sam_stage(config, predictor=predictor)
 
 
 def _create_timestamp_dir(base_dir: Path) -> Path:
@@ -1095,12 +1512,19 @@ def _derive_run_seed(base_seed: int, run_index: int, salt: int) -> int:
     return int(_splitmix64(mixed) & 0x7FFFFFFFFFFFFFFF)
 
 
-def _parse_args(argv: Optional[Iterable[str]] = None) -> Tuple[RunConfig, int]:
+def _parse_args(
+    argv: Optional[Iterable[str]] = None,
+) -> Tuple[RunConfig, int, int, Optional[int], Optional[Path]]:
     parser = argparse.ArgumentParser(description="Text-to-image + SAM composite pipeline")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--background-prompt", required=True)
     parser.add_argument("--base-prompt", default=None)
     parser.add_argument("--paired-prompt", default=None)
+    parser.add_argument(
+        "--object-name",
+        default=None,
+        help="Object name to use for grounding SAM masks (required for grounding prompt mode).",
+    )
     parser.add_argument(
         "--base-prompt-elements-json",
         default=None,
@@ -1117,6 +1541,13 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> Tuple[RunConfig, int]:
     parser.add_argument("--seed-real", type=int, required=True)
     parser.add_argument("--seed-toy", type=int, required=True)
     parser.add_argument("--num-runs", type=int, default=3)
+    parser.add_argument("--run-start", type=int, default=0)
+    parser.add_argument("--run-count", type=int, default=None)
+    parser.add_argument(
+        "--run-root",
+        default=None,
+        help="Optional run root directory (skips timestamp creation).",
+    )
 
     parser.add_argument("--pipeline", default="flux", choices=["flux", "sd3", "qwen"])
     parser.add_argument("--model-id", default=None)
@@ -1126,7 +1557,11 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> Tuple[RunConfig, int]:
     parser.add_argument("--num-inference-steps", type=int, default=None)
     parser.add_argument("--guidance-scale", type=float, default=None)
     parser.add_argument("--max-sequence-length", type=int, default=512)
-    parser.add_argument("--torch-dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
+    parser.add_argument(
+        "--torch-dtype",
+        default=None,
+        choices=["bfloat16", "float16", "float32", "bf8"],
+    )
     parser.add_argument(
         "--hf-token",
         default=None,
@@ -1150,7 +1585,11 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> Tuple[RunConfig, int]:
 
     parser.add_argument("--sam-checkpoint", required=True)
     parser.add_argument("--sam-model-type", default="vit_h")
-    parser.add_argument("--sam-prompt-mode", default="points", choices=["points", "box"])
+    parser.add_argument(
+        "--sam-prompt-mode",
+        default="grounding",
+        choices=["points", "box", "grounding"],
+    )
     parser.add_argument("--sam-box-ratio-w", type=float, default=0.8)
     parser.add_argument("--sam-box-ratio-h", type=float, default=0.85)
     parser.add_argument("--feather-radius-px", type=int, default=3)
@@ -1158,6 +1597,8 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> Tuple[RunConfig, int]:
     parser.add_argument("--morph-kernel-px", type=int, default=3)
     parser.add_argument("--mask-min-area-frac", type=float, default=0.01)
     parser.add_argument("--mask-max-area-frac", type=float, default=0.9)
+    parser.add_argument("--lang-sam-box-threshold", type=float, default=0.3)
+    parser.add_argument("--lang-sam-text-threshold", type=float, default=0.25)
 
     parser.add_argument("--anchor-x", type=float, default=0.5)
     parser.add_argument("--anchor-y", type=float, default=0.9)
@@ -1165,7 +1606,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> Tuple[RunConfig, int]:
     parser.add_argument("--scale-multiplier", type=float, default=1.0)
     parser.add_argument("--placement-mode", default="center", choices=["random", "anchor", "center"])
 
-    parser.add_argument("--target-hue-deg", type=float, required=True)
+    parser.add_argument("--target-hue-deg", type=float, default=None)
     parser.add_argument("--min-saturation", type=float, default=0.25)
 
     parser.add_argument("--device", default="cuda")
@@ -1173,6 +1614,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> Tuple[RunConfig, int]:
     args = parser.parse_args(argv)
 
     output_dir = _resolve_path(args.output_dir)
+    run_root = _resolve_path(args.run_root) if args.run_root else None
     sam_checkpoint = _resolve_path(args.sam_checkpoint)
     base_prompt_elements_path = (
         _resolve_path(args.base_prompt_elements_json) if args.base_prompt_elements_json else None
@@ -1200,8 +1642,20 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> Tuple[RunConfig, int]:
         raise ValueError("--mask-selection-rule must be center_included_max_area for determinism.")
     if args.num_runs <= 0:
         raise ValueError("--num-runs must be > 0.")
+    if args.run_start < 0:
+        raise ValueError("--run-start must be >= 0.")
+    if args.run_start >= args.num_runs:
+        raise ValueError("--run-start must be < --num-runs.")
+    if args.run_count is not None and args.run_count <= 0:
+        raise ValueError("--run-count must be > 0 when provided.")
+    if args.run_count is not None and args.run_start + args.run_count > args.num_runs:
+        raise ValueError("--run-start + --run-count must be <= --num-runs.")
     if args.model_id and args.flux_model_id and args.model_id != args.flux_model_id:
         raise ValueError("--model-id and --flux-model-id must match if both are set.")
+    if args.sam_prompt_mode == "grounding" and not args.object_name:
+        raise ValueError("--object-name is required when --sam-prompt-mode grounding is used.")
+    if args.target_hue_deg is None:
+        _resolve_color_transform(args.rare_color, None)
 
     env_file = _resolve_path(args.env_file) if args.env_file else None
     if env_file is None:
@@ -1221,21 +1675,15 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> Tuple[RunConfig, int]:
     local_files_only = args.local_files_only or args.flux_local_files_only
     num_inference_steps = args.num_inference_steps
     guidance_scale = args.guidance_scale
-    if args.pipeline == "sd3":
-        if num_inference_steps is None:
-            num_inference_steps = 30
-        if guidance_scale is None:
-            guidance_scale = 5.0
-    elif args.pipeline == "qwen":
-        if num_inference_steps is None:
-            num_inference_steps = 50
-        if guidance_scale is None:
-            guidance_scale = 4.0
-    else:
-        if num_inference_steps is None:
-            num_inference_steps = 50
-        if guidance_scale is None:
-            guidance_scale = 3.5
+    default_steps, default_guidance = _resolve_generation_defaults(args.pipeline, model_id)
+    if num_inference_steps is None:
+        num_inference_steps = default_steps
+    if guidance_scale is None:
+        guidance_scale = default_guidance
+    torch_dtype = args.torch_dtype
+    if torch_dtype is None:
+        torch_dtype = "bf8" if args.pipeline == "qwen" else "bfloat16"
+
     flux = FluxParams(
         pipeline=args.pipeline,
         model_id=model_id,
@@ -1244,7 +1692,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> Tuple[RunConfig, int]:
         num_inference_steps=num_inference_steps,
         guidance_scale=guidance_scale,
         max_sequence_length=args.max_sequence_length,
-        torch_dtype=args.torch_dtype,
+        torch_dtype=torch_dtype,
         local_files_only=local_files_only,
     )
 
@@ -1259,6 +1707,8 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> Tuple[RunConfig, int]:
         morph_kernel_px=args.morph_kernel_px,
         min_area_frac=args.mask_min_area_frac,
         max_area_frac=args.mask_max_area_frac,
+        lang_sam_box_threshold=args.lang_sam_box_threshold,
+        lang_sam_text_threshold=args.lang_sam_text_threshold,
     )
 
     composite = CompositeParams(
@@ -1279,6 +1729,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> Tuple[RunConfig, int]:
         background_prompt=args.background_prompt,
         base_prompt=base_prompt,
         paired_prompt=paired_prompt,
+        object_name=args.object_name,
         base_prompt_elements_path=base_prompt_elements_path,
         paired_prompt_elements_path=paired_prompt_elements_path,
         base_prompt_elements=None,
@@ -1296,22 +1747,16 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> Tuple[RunConfig, int]:
         color=color,
         device=args.device,
         hf_token=hf_token,
-    ), args.num_runs
+    ), args.num_runs, args.run_start, args.run_count, run_root
 
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
-    config, num_runs = _parse_args(argv)
-    run_root = _create_timestamp_dir(config.output_dir)
-
-    pipe = _load_text2image_pipeline(
-        config.flux.pipeline,
-        config.flux.model_id,
-        config.flux.torch_dtype,
-        config.device,
-        config.hf_token,
-        config.flux.local_files_only,
-    )
-    predictor = _load_sam_predictor(config.sam.checkpoint, config.sam.model_type, config.device)
+    config, num_runs, run_start, run_count, run_root_arg = _parse_args(argv)
+    if run_root_arg is None:
+        run_root = _create_timestamp_dir(config.output_dir)
+    else:
+        run_root = run_root_arg
+        run_root.mkdir(parents=True, exist_ok=True)
 
     joiner = ", "
     base_prompts: Optional[list[str]] = None
@@ -1342,7 +1787,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "Paired prompt",
         )
 
-    for run_index in range(num_runs):
+    run_configs: list[RunConfig] = []
+    if run_count is None:
+        run_count = num_runs - run_start
+    run_indices = range(run_start, run_start + run_count)
+    for run_index in run_indices:
         run_dir = run_root / f"run_{run_index:02d}"
         seed_bg = _derive_run_seed(config.seed_bg, run_index, 0xA5A5A5A5)
         seed_real = _derive_run_seed(config.seed_real, run_index, 0x5A5A5A5A)
@@ -1364,7 +1813,38 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             run_index=run_index,
             seed_offset=run_index,
         )
-        run_pipeline(run_config, pipe=pipe, predictor=predictor)
+        run_configs.append(run_config)
+
+    pipe = _load_text2image_pipeline(
+        config.flux.pipeline,
+        config.flux.model_id,
+        config.flux.torch_dtype,
+        config.device,
+        config.hf_token,
+        config.flux.local_files_only,
+    )
+    if len(run_configs) == 1:
+        _run_generation_stage(run_configs[0], pipe=pipe)
+    else:
+        _run_generation_stage_batch(run_configs, pipe=pipe)
+
+    try:
+        pipe.to("cpu")
+    except Exception:
+        pass
+    del pipe
+    gc.collect()
+    if config.device != "cpu":
+        _release_torch_cuda()
+
+    if config.sam.prompt_mode == "grounding":
+        lang_sam_model = _load_lang_sam_model(config.device)
+        for run_config in run_configs:
+            _run_sam_stage(run_config, predictor=None, lang_sam_model=lang_sam_model)
+    else:
+        predictor = _load_sam_predictor(config.sam.checkpoint, config.sam.model_type, config.device)
+        for run_config in run_configs:
+            _run_sam_stage(run_config, predictor=predictor)
 
 
 if __name__ == "__main__":

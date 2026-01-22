@@ -1,18 +1,17 @@
-python -m analyse_vit.rare_colour_bias.flux_sam_composite \
+python -m analyse_vit.rare_colour_bias.image_generation \
  --pipeline qwen \
- --model-id stabilityai/stable-diffusion-3.5-large \
- --output-dir results \
+ --output-dir results/raw/image_generation \
  --background-prompt "A grass field" \
  --base-prompt-elements-json data/prompt_seeds/kangaroo/real_kangaroo_prompt_seeds.json \
  --paired-prompt-elements-json data/prompt_seeds/kangaroo/paired_kangaroo_prompt_seeds.json \
+ --object-name "kangaroo" \
  --dominant-color "brown" \
  --rare-color "pink" \
  --seed-bg 123 \
  --seed-real 456 \
  --seed-toy 789 \
- --num-inference-steps 30 \
- --guidance-scale 2.5 \
- --target-hue-deg 210 \
- --sam-prompt-mode box \
+ --sam-prompt-mode grounding \
  --sam-checkpoint models/sam/sam_vit_h_4b8939.pth \
- --num-runs 10 \
+ --lang-sam-box-threshold 0.3 \
+ --lang-sam-text-threshold 0.25 \
+ --num-runs 3 \

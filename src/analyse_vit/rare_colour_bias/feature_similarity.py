@@ -75,6 +75,8 @@ def _load_image(path: Path) -> Image.Image:
 
 def _find_image_path(run_dir: Path, key: str) -> Path:
     candidates = (
+        run_dir / "outputs" / f"scene_{key}.png",
+        run_dir / "outputs" / f"{key}.png",
         run_dir / f"scene_{key}.png",
         run_dir / f"{key}.png",
     )
