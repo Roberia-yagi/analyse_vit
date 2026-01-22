@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "analyse_vit"
+version = "0.1.0"
+description = "Deterministic FLUX + SAM composite pipeline."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "numpy",
+  "Pillow",
+  "torch",
+  "diffusers",
+  "segment-anything",
+  "opencv-python",
+  "transformers",
+  "accelerate",
+  "sentencepiece",
+  "protobuf",
+  "torchvision",
+  "safetensors",
+  "scikit-learn",
+  "matplotlib",
+  "lang-sam @ git+https://github.com/luca-medeiros/lang-segment-anything.git",
+  "open_clip_torch==2.30.0"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

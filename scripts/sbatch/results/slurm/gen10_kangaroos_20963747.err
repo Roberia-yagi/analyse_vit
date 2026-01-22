@@ -1,0 +1,13 @@
+/data/gpfs/projects/punim2431/projects/image_editing/experiments/analyse_vit/.venv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+Loading pipeline components...:   0%|          | 0/9 [00:00<?, ?it/s]
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s][A
+Loading checkpoint shards:  50%|█████     | 1/2 [00:00<00:00,  1.03it/s][A
+Loading checkpoint shards: 100%|██████████| 2/2 [00:01<00:00,  1.27it/s][ALoading checkpoint shards: 100%|██████████| 2/2 [00:01<00:00,  1.22it/s]
+Loading pipeline components...:  11%|█         | 1/9 [00:02<00:21,  2.73s/it]`torch_dtype` is deprecated! Use `dtype` instead!
+Loading pipeline components...:  22%|██▏       | 2/9 [00:04<00:15,  2.28s/it]Loading pipeline components...:  33%|███▎      | 3/9 [00:04<00:07,  1.30s/it]
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s][A
+Loading checkpoint shards:  50%|█████     | 1/2 [00:06<00:06,  6.71s/it][A
+Loading checkpoint shards: 100%|██████████| 2/2 [00:12<00:00,  6.34s/it][ALoading checkpoint shards: 100%|██████████| 2/2 [00:12<00:00,  6.40s/it]
+Loading pipeline components...:  44%|████▍     | 4/9 [00:17<00:29,  5.84s/it]You set `add_prefix_space`. The tokenizer needs to be converted from the slow tokenizers
+Loading pipeline components...:  56%|█████▌    | 5/9 [00:17<00:15,  3.81s/it]Loading pipeline components...:  67%|██████▋   | 6/9 [00:18<00:07,  2.64s/it]Loading pipeline components...: 100%|██████████| 9/9 [00:18<00:00,  1.10s/it]Loading pipeline components...: 100%|██████████| 9/9 [00:18<00:00,  2.03s/it]

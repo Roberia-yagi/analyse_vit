@@ -1,0 +1,6 @@
+results/*
+models/*
+data/*
+.venv/*
+*.egg-info
+
