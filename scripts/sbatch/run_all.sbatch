@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=gen10_kangaroos
+#SBATCH --job-name=run_all
 #SBATCH --chdir=/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
@@ -10,7 +10,7 @@ set -euo pipefail
 
 PROJECT_ROOT="${PWD}"
 source "$PROJECT_ROOT/scripts/sbatch/utils/race_guard.sh"
-RUN_SCRIPT="$PROJECT_ROOT/scripts/sh/generate_images.sh"
+RUN_SCRIPT="$PROJECT_ROOT/scripts/sh/run_all.sh"
 PY_MODULE="analyse_vit.rare_colour_bias.image_generation"
 RESULTS_DIR="$PROJECT_ROOT/results/raw/image_generation"
 

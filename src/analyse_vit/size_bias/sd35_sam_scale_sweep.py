@@ -259,12 +259,28 @@ def _load_sam_predictor(checkpoint: Path, model_type: str, device: str):
 
 
 def _load_lang_sam_model(device: str):
-    from lang_sam import LangSAM
+    from sam3 import build_sam3_image_model
+    from sam3.model.sam3_image_processor import Sam3Processor
 
-    sig = inspect.signature(LangSAM)
-    if "device" in sig.parameters:
-        return LangSAM(device=device)
-    return LangSAM()
+    model = build_sam3_image_model(device=device)
+    return Sam3Processor(model, device=device)
+
+
+def _predict_sam3_output(
+    processor,
+    image: Image.Image,
+    text_prompt: str,
+    box_threshold: float,
+) -> Optional[dict[str, Any]]:
+    if not (hasattr(processor, "set_image") and hasattr(processor, "set_text_prompt")):
+        return None
+    state = processor.set_image(image)
+    if hasattr(processor, "set_confidence_threshold"):
+        processor.set_confidence_threshold(float(box_threshold), state)
+    output = processor.set_text_prompt(prompt=text_prompt, state=state)
+    if isinstance(output, dict):
+        return output
+    return None
 
 
 def _coerce_numpy(array_like) -> Optional[np.ndarray]:
@@ -310,52 +326,30 @@ def _predict_mask_lang_sam(
     box_threshold: float,
     text_threshold: float,
 ) -> Optional[np.ndarray]:
-    if not hasattr(model, "predict"):
+    output = _predict_sam3_output(model, image, text_prompt, box_threshold)
+    if output is None:
         return None
-    sig = inspect.signature(model.predict)
-    kwargs: dict[str, Any] = {}
-    if "box_threshold" in sig.parameters:
-        kwargs["box_threshold"] = box_threshold
-    if "text_threshold" in sig.parameters:
-        kwargs["text_threshold"] = text_threshold
-    images_arg: Any = image
-    texts_arg: Any = text_prompt
-    if "images_pil" in sig.parameters or "texts_prompt" in sig.parameters:
-        images_arg = [image]
-        texts_arg = [text_prompt]
-    output = model.predict(images_arg, texts_arg, **kwargs)
 
-    masks = None
-    scores = None
-    if isinstance(output, dict):
-        masks = output.get("masks") if output.get("masks") is not None else output.get("mask")
-        scores = output.get("scores") if output.get("scores") is not None else output.get("logits")
-    elif isinstance(output, list) and output and isinstance(output[0], dict):
-        first = output[0]
-        masks = first.get("masks") if first.get("masks") is not None else first.get("mask")
-        scores = (
-            first.get("mask_scores")
-            if first.get("mask_scores") is not None
-            else first.get("scores")
-            if first.get("scores") is not None
-            else first.get("logits")
-        )
-    elif isinstance(output, (list, tuple)):
-        for item in output:
-            if masks is None:
-                arr = _coerce_numpy(item)
-                if arr is not None and arr.ndim >= 2:
-                    masks = arr
-            if scores is None and isinstance(item, (list, tuple)):
-                scores = item
+    masks = output.get("masks") if output.get("masks") is not None else output.get("mask")
+    scores = (
+        output.get("mask_scores")
+        if output.get("mask_scores") is not None
+        else output.get("scores")
+        if output.get("scores") is not None
+        else output.get("logits")
+    )
 
     masks_np = _coerce_numpy(masks)
     scores_np = _coerce_numpy(scores)
     if masks_np is None:
         return None
-    if masks_np.ndim == 2 and masks_np.shape != (image.height, image.width):
+    if masks_np.ndim == 4 and masks_np.shape[1] == 1:
+        masks_np = masks_np[:, 0]
+    if masks_np.ndim == 2:
+        masks_np = masks_np[None, :, :]
+    if masks_np.ndim != 3:
         return None
-    if masks_np.ndim >= 3 and masks_np.shape[-2:] != (image.height, image.width):
+    if masks_np.shape[-2:] != (image.height, image.width):
         return None
     center_xy = (image.width // 2, image.height // 2)
     return _select_lang_sam_mask(masks_np, scores_np, center_xy)
@@ -689,12 +683,12 @@ def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
     lang_sam_model = None
     if config.sam.mask_mode in ("lang_sam", "auto"):
         try:
-            logger.info("Loading LangSAM model for text-guided masks.")
+            logger.info("Loading SAM3 model for text-guided masks.")
             lang_sam_model = _load_lang_sam_model(config.device)
         except Exception as exc:
             if config.sam.mask_mode == "lang_sam":
-                raise RuntimeError("Failed to load LangSAM for text-guided masks.") from exc
-            logger.warning("LangSAM unavailable; falling back to SAM masks. (%s)", exc)
+                raise RuntimeError("Failed to load SAM3 for text-guided masks.") from exc
+            logger.warning("SAM3 unavailable; falling back to SAM masks. (%s)", exc)
 
     images_meta: list[dict[str, Any]] = []
     category_mask_info: dict[str, dict[str, Any]] = {}
@@ -732,7 +726,7 @@ def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
 
         lang_mask = None
         if config.sam.mask_mode in ("lang_sam", "auto") and lang_sam_model is not None:
-            logger.info("Predicting LangSAM mask for category '%s'.", category)
+            logger.info("Predicting SAM3 mask for category '%s'.", category)
             lang_mask_raw = _predict_mask_lang_sam(
                 lang_sam_model,
                 obj_image,
@@ -756,7 +750,7 @@ def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
         score_lang = None
         if config.sam.mask_mode == "lang_sam":
             if lang_mask is None:
-                raise RuntimeError(f"LangSAM did not return a mask for '{category}'.")
+                raise RuntimeError(f"SAM3 did not return a mask for '{category}'.")
             selected_mask = lang_mask
             selected_method = "lang_sam"
             score_lang = _score_mask(
@@ -786,7 +780,7 @@ def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
             )
         else:
             logger.info(
-                "Selected mask for '%s': %s (sam_score=%.3f, lang_sam_score=%.3f).",
+                "Selected mask for '%s': %s (sam_score=%.3f, sam3_score=%.3f).",
                 category,
                 selected_method,
                 score_sam,

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
+import inspect
 import json
 import logging
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -22,12 +24,15 @@ LOGGER = logging.getLogger("analyse_vit.feature_similarity")
 class ModelSpec:
     key: str
     model_id: str
+    backend: str = "hf"
 
 
 MODEL_SPECS: Dict[str, ModelSpec] = {
     "clip": ModelSpec(key="clip", model_id="openai/clip-vit-large-patch14"),
     "siglip": ModelSpec(key="siglip", model_id="google/siglip-base-patch16-256"),
     "dinov2": ModelSpec(key="dinov2", model_id="facebook/dinov2-base"),
+    "pe-core-l14-336": ModelSpec(key="pe-core-l14-336", model_id="PE-Core-L14-336", backend="perception"),
+    "qwen3-vl-8b": ModelSpec(key="qwen3-vl-8b", model_id="Qwen/Qwen3-VL-8B", backend="qwen_vl"),
 }
 
 IMAGE_KEYS = ("real_dom", "real_rare", "toy_dom", "toy_rare")
@@ -93,7 +98,7 @@ def _load_images_for_run(run_dir: Path, keys: Sequence[str]) -> Dict[str, Image.
     return images
 
 
-def _extract_features(
+def _extract_features_hf(
     model: torch.nn.Module,
     processor: object,
     images: Sequence[Image.Image],
@@ -116,6 +121,105 @@ def _extract_features(
                 else:
                     batch_features = outputs.last_hidden_state[:, 0]
             features.append(batch_features.detach().cpu())
+    return torch.cat(features, dim=0)
+
+
+def _extract_features_perception(
+    model: torch.nn.Module,
+    processor: object,
+    images: Sequence[Image.Image],
+    device: str,
+    batch_size: int,
+) -> torch.Tensor:
+    model.eval()
+    features: List[torch.Tensor] = []
+    use_amp = device == "cuda"
+    autocast_ctx = torch.autocast("cuda", dtype=torch.bfloat16) if use_amp else contextlib.nullcontext()
+    with torch.no_grad(), autocast_ctx:
+        for start in range(0, len(images), batch_size):
+            batch = images[start : start + batch_size]
+            inputs = torch.stack([processor(image) for image in batch], dim=0).to(device)
+            if hasattr(model, "encode_image"):
+                batch_features = model.encode_image(inputs)
+            elif hasattr(model, "forward_features"):
+                feats = model.forward_features(inputs, strip_cls_token=False)
+                batch_features = feats[:, 0] if feats.dim() == 3 else feats
+            else:
+                outputs = model(inputs)
+                if isinstance(outputs, tuple):
+                    batch_features = outputs[0]
+                elif hasattr(outputs, "last_hidden_state"):
+                    batch_features = outputs.last_hidden_state[:, 0]
+                else:
+                    batch_features = outputs
+            features.append(batch_features.float().detach().cpu())
+    return torch.cat(features, dim=0)
+
+
+def _filter_kwargs_for_callable(func: Callable[..., object], kwargs: Dict[str, object]) -> Dict[str, object]:
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return kwargs
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()):
+        return kwargs
+    return {key: value for key, value in kwargs.items() if key in sig.parameters}
+
+
+def _unwrap_qwen_vision_encoder(model: torch.nn.Module) -> torch.nn.Module:
+    if hasattr(model, "get_vision_tower"):
+        vision = model.get_vision_tower()
+    elif hasattr(model, "vision_tower"):
+        vision = getattr(model, "vision_tower")
+    elif hasattr(model, "visual"):
+        vision = getattr(model, "visual")
+    elif hasattr(model, "vision_model"):
+        vision = getattr(model, "vision_model")
+    else:
+        raise ValueError("Qwen VL model does not expose a vision encoder (vision_tower/visual/vision_model).")
+
+    if isinstance(vision, (list, tuple)):
+        if not vision:
+            raise ValueError("Qwen VL vision_tower is empty.")
+        vision = vision[0]
+    if not isinstance(vision, torch.nn.Module):
+        raise ValueError("Qwen VL vision encoder is not a torch module.")
+    return vision
+
+
+def _extract_features_qwen_vl(
+    model: torch.nn.Module,
+    processor: object,
+    images: Sequence[Image.Image],
+    device: str,
+    batch_size: int,
+) -> torch.Tensor:
+    model.eval()
+    features: List[torch.Tensor] = []
+    use_amp = device == "cuda"
+    autocast_ctx = torch.autocast("cuda", dtype=torch.bfloat16) if use_amp else contextlib.nullcontext()
+    with torch.no_grad(), autocast_ctx:
+        for start in range(0, len(images), batch_size):
+            batch = images[start : start + batch_size]
+            inputs = processor(images=batch, return_tensors="pt")
+            inputs = {key: value.to(device) for key, value in inputs.items()}
+            call_kwargs = _filter_kwargs_for_callable(model.forward, inputs)
+            outputs = model(**call_kwargs)
+            if isinstance(outputs, torch.Tensor):
+                batch_features = outputs
+            elif hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+                batch_features = outputs.pooler_output
+            elif hasattr(outputs, "last_hidden_state"):
+                batch_features = outputs.last_hidden_state[:, 0]
+            elif isinstance(outputs, (tuple, list)) and outputs:
+                first = outputs[0]
+                if isinstance(first, torch.Tensor):
+                    batch_features = first
+                else:
+                    raise ValueError("Unexpected Qwen VL vision encoder output type.")
+            else:
+                raise ValueError("Unexpected Qwen VL vision encoder output structure.")
+            features.append(batch_features.float().detach().cpu())
     return torch.cat(features, dim=0)
 
 
@@ -172,6 +276,19 @@ def _resolve_models(model_args: Sequence[str]) -> List[ModelSpec]:
         if entry in MODEL_SPECS:
             resolved.append(MODEL_SPECS[entry])
             continue
+        lowered = entry.lower()
+        if lowered.startswith("pe:") or lowered.startswith("perception:"):
+            model_id = entry.split(":", 1)[1].strip()
+            if not model_id:
+                raise ValueError("Perception model must be formatted as 'pe:PE-Core-L14-336'.")
+            key = f"pe-{model_id}".lower().replace("/", "_").replace(" ", "_")
+            resolved.append(ModelSpec(key=key, model_id=model_id, backend="perception"))
+            continue
+        if lowered.startswith("facebook/pe-"):
+            model_id = entry.split("/", 1)[1].strip()
+            key = f"pe-{model_id}".lower().replace("/", "_").replace(" ", "_")
+            resolved.append(ModelSpec(key=key, model_id=model_id, backend="perception"))
+            continue
         matches = [spec for spec in MODEL_SPECS.values() if spec.model_id == entry]
         if matches:
             resolved.append(matches[0])
@@ -179,6 +296,54 @@ def _resolve_models(model_args: Sequence[str]) -> List[ModelSpec]:
         valid = ", ".join(sorted(MODEL_SPECS.keys()))
         raise ValueError(f"Unknown model '{entry}'. Use one of: {valid} or the full model id.")
     return resolved
+
+
+def _load_model(
+    spec: ModelSpec,
+    device: str,
+) -> Tuple[torch.nn.Module, object, Callable[[torch.nn.Module, object, Sequence[Image.Image], str, int], torch.Tensor]]:
+    if spec.backend == "qwen_vl":
+        try:
+            from transformers import AutoModelForVision2Seq
+        except Exception:
+            AutoModelForVision2Seq = None
+
+        processor = AutoProcessor.from_pretrained(spec.model_id, trust_remote_code=True)
+        if AutoModelForVision2Seq is not None:
+            try:
+                full_model = AutoModelForVision2Seq.from_pretrained(spec.model_id, trust_remote_code=True)
+            except Exception:
+                full_model = AutoModel.from_pretrained(spec.model_id, trust_remote_code=True)
+        else:
+            full_model = AutoModel.from_pretrained(spec.model_id, trust_remote_code=True)
+
+        vision_encoder = _unwrap_qwen_vision_encoder(full_model).to(device)
+        return vision_encoder, processor, _extract_features_qwen_vl
+
+    if spec.backend == "perception":
+        try:
+            import core.vision_encoder.pe as pe  # type: ignore
+            import core.vision_encoder.transforms as pe_transforms  # type: ignore
+        except Exception as exc:
+            raise SystemExit(
+                "perception_models is required for PE models. "
+                "Install with: pip install git+https://github.com/facebookresearch/perception_models.git"
+            ) from exc
+
+        if spec.model_id.startswith("PE-Core"):
+            model = pe.CLIP.from_config(spec.model_id, pretrained=True)
+        else:
+            model = pe.VisionTransformer.from_config(spec.model_id, pretrained=True)
+        model = model.to(device)
+        processor = pe_transforms.get_image_transform(model.image_size)
+        return model, processor, _extract_features_perception
+
+    try:
+        processor = AutoProcessor.from_pretrained(spec.model_id)
+    except Exception:
+        processor = AutoImageProcessor.from_pretrained(spec.model_id)
+    model = AutoModel.from_pretrained(spec.model_id).to(device)
+    return model, processor, _extract_features_hf
 
 
 def _format_pair_key(left: str, right: str) -> str:
@@ -478,7 +643,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--models",
         nargs="+",
         default=list(MODEL_SPECS.keys()),
-        help="Models to run: clip siglip dinov2 (or full model ids).",
+        help=(
+            "Models to run: clip siglip dinov2 pe-core-l14-336 (or full model ids). "
+            "For Perception Encoder, use pe:PE-Core-L14-336 (or facebook/PE-Core-L14-336)."
+        ),
     )
     parser.add_argument(
         "--pairs",
@@ -590,11 +758,7 @@ def main() -> None:
     try:
         for spec in models:
             LOGGER.info("Loading model: %s", spec.model_id)
-            try:
-                processor = AutoProcessor.from_pretrained(spec.model_id)
-            except Exception:
-                processor = AutoImageProcessor.from_pretrained(spec.model_id)
-            model = AutoModel.from_pretrained(spec.model_id).to(device)
+            model, processor, extractor = _load_model(spec, device)
 
             metrics_cos: Dict[str, List[float]] = {_format_pair_key(a, b): [] for a, b in pairs}
             metrics_special: Dict[str, List[float]] = {label: [] for label in SPECIAL_PAIRS}
@@ -606,7 +770,7 @@ def main() -> None:
             for run_dir in run_dirs:
                 images_by_key = _load_images_for_run(run_dir, IMAGE_KEYS)
                 ordered_images = [images_by_key[key] for key in IMAGE_KEYS]
-                features_raw = _extract_features(model, processor, ordered_images, device, args.batch_size)
+                features_raw = extractor(model, processor, ordered_images, device, args.batch_size)
                 features_norm = _normalize_features(features_raw)
 
                 raw_by_key = {key: features_raw[idx] for idx, key in enumerate(IMAGE_KEYS)}

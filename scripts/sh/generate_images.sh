@@ -4,14 +4,7 @@ python -m analyse_vit.rare_colour_bias.image_generation \
  --background-prompt "A grass field" \
  --base-prompt-elements-json data/prompt_seeds/kangaroo/real_kangaroo_prompt_seeds.json \
  --paired-prompt-elements-json data/prompt_seeds/kangaroo/paired_kangaroo_prompt_seeds.json \
- --object-name "kangaroo" \
- --dominant-color "brown" \
- --rare-color "pink" \
  --seed-bg 123 \
  --seed-real 456 \
  --seed-toy 789 \
- --sam-prompt-mode grounding \
- --sam-checkpoint models/sam/sam_vit_h_4b8939.pth \
- --lang-sam-box-threshold 0.3 \
- --lang-sam-text-threshold 0.25 \
- --num-runs 3 \
+ --num-runs 10 \

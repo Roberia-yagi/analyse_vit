@@ -51,13 +51,12 @@ TARGETS_40=(
 TARGETS_80=(
   "gpu-a100"
   "gpu-h100"
-  "deeplearn@deeplearn"
   "feit-gpu-a100:feit"
 )
 
 # defaults
 gpu_ram="40"
-interval=10
+interval=5
 lines=30
 clear_screen=1
 show_tail=1
@@ -224,6 +223,84 @@ get_top_state() {
     | tr -d ' ' || true
 }
 
+# ---- GPU VRAM (used/total) helper ------------------------------------------
+get_first_node_for_job() {
+  local b="$1"
+  local jl batchhost nodelist
+
+  jl="$(scontrol show job "$b" -o 2>/dev/null || true)"
+  [[ -z "$jl" ]] && echo "" && return 0
+
+  batchhost="$(sed -n 's/.*BatchHost=\([^ ]*\).*/\1/p' <<<"$jl" | head -n1 || true)"
+  if [[ -n "${batchhost:-}" && "$batchhost" != "(null)" && "$batchhost" != "Unknown" && "$batchhost" != "None" ]]; then
+    echo "$batchhost"
+    return 0
+  fi
+
+  nodelist="$(sed -n 's/.*NodeList=\([^ ]*\).*/\1/p' <<<"$jl" | head -n1 || true)"
+  if [[ -z "${nodelist:-}" || "$nodelist" == "(null)" || "$nodelist" == "Unknown" || "$nodelist" == "None" ]]; then
+    echo ""
+    return 0
+  fi
+
+  if command -v scontrol >/dev/null 2>&1; then
+    scontrol show hostnames "$nodelist" 2>/dev/null | head -n1 || true
+  else
+    echo "$nodelist"
+  fi
+}
+
+gpu_vram_block() {
+  local b="$1" node="$2"
+  local out=""
+
+  [[ -z "${node:-}" ]] && return 0
+  command -v srun >/dev/null 2>&1 || return 0
+
+  run_query() {
+    local use_overlap="$1"
+    local -a cmd=(
+      srun
+      --jobid="$b"
+      --nodes=1
+      --ntasks=1
+      --nodelist="$node"
+      --quiet
+    )
+    [[ "$use_overlap" -eq 1 ]] && cmd+=( --overlap )
+    cmd+=(
+      nvidia-smi
+      --query-gpu=memory.used,memory.total
+      --format=csv,noheader,nounits
+    )
+
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 5s "${cmd[@]}" 2>/dev/null || true
+    else
+      "${cmd[@]}" 2>/dev/null || true
+    fi
+  }
+
+  out="$(run_query 1)"
+  [[ -z "$out" ]] && out="$(run_query 0)"
+
+  if [[ -z "$out" ]]; then
+    echo "[gpu vram] (unavailable)"
+    echo
+    return 0
+  fi
+
+  echo "[gpu vram] node=${node} (used/total MiB)"
+  awk -F',' '
+    {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1);
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2);
+      printf("  GPU%d %s/%s MiB\n", NR-1, $1, $2);
+    }
+  ' <<<"$out"
+  echo
+}
+
 # Phase A: wait for winner, while showing overview of all submitted jobs
 while [[ ! -s "${WINNER_FILE}" ]]; do
   if [[ "$clear_screen" -eq 1 ]]; then
@@ -379,6 +456,9 @@ while true; do
     state_now="$(get_top_state "$base")"
     [[ -n "$state_now" ]] && last_state="$state_now"
   fi
+
+  node_now="$(get_first_node_for_job "$base")"
+  gpu_vram_block "$base" "$node_now"
 
   if [[ "$show_tail" -eq 1 ]]; then
     tail_block() {

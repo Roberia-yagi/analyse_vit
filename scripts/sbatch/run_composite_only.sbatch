@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=gen10_kangaroos
+#SBATCH --job-name=run_composite_only
 #SBATCH --chdir=/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
@@ -10,8 +10,8 @@ set -euo pipefail
 
 PROJECT_ROOT="${PWD}"
 source "$PROJECT_ROOT/scripts/sbatch/utils/race_guard.sh"
-RUN_SCRIPT="$PROJECT_ROOT/scripts/sh/generate_images.sh"
-PY_MODULE="analyse_vit.rare_colour_bias.image_generation"
+RUN_SCRIPT="$PROJECT_ROOT/scripts/sh/run_composite_only.sh"
+PY_MODULE="analyse_vit.rare_colour_bias.image_composite"
 RESULTS_DIR="$PROJECT_ROOT/results/raw/image_generation"
 
 find_latest_run_dir() {
@@ -40,15 +40,21 @@ copy_sources() {
   fi
 }
 
+RUN_ROOT_DATE="${RUN_ROOT_DATE:-}"
+if [[ -z "$RUN_ROOT_DATE" ]]; then
+  echo "Error: set RUN_ROOT_DATE (e.g., 20260123_170000) via sbatch --export." >&2
+  exit 1
+fi
+
 cd "$PROJECT_ROOT"
 source "$PROJECT_ROOT/.venv/bin/activate"
 export PYTHONUNBUFFERED=1
 
-bash "$RUN_SCRIPT"
+bash "$RUN_SCRIPT" "$RUN_ROOT_DATE"
 
-run_root="$(find_latest_run_dir "$RESULTS_DIR" || true)"
-if [[ -n "$run_root" ]]; then
+run_root="$RESULTS_DIR/$RUN_ROOT_DATE"
+if [[ -d "$run_root" ]]; then
   copy_sources "$run_root" "$RUN_SCRIPT" "$PY_MODULE"
 else
-  echo "Warning: results run directory not found under $PROJECT_ROOT/results" >&2
+  echo "Warning: results run directory not found: $run_root" >&2
 fi

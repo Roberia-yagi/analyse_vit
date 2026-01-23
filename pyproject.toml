@@ -7,9 +7,9 @@ name = "analyse_vit"
 version = "0.1.0"
 description = "Deterministic FLUX + SAM composite pipeline."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = [
-  "numpy",
+  "numpy>=1.26,<2",
   "Pillow",
   "torch",
   "diffusers",
@@ -23,8 +23,12 @@ dependencies = [
   "safetensors",
   "scikit-learn",
   "matplotlib",
-  "lang-sam @ git+https://github.com/luca-medeiros/lang-segment-anything.git",
-  "open_clip_torch==2.30.0"
+  "perception_models @ git+https://github.com/facebookresearch/perception_models.git",
+  "sam3 @ git+https://github.com/facebookresearch/sam3.git",
+  "open_clip_torch==2.30.0",
+  "einops",
+  "decord",
+  "pycocotools"
 ]
 
 [tool.setuptools]

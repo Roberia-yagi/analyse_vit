@@ -176,7 +176,7 @@ def _select_mask_for_object(
 
     lang_mask = None
     if sam.mask_mode in ("lang_sam", "auto") and lang_sam_model is not None:
-        logger.info("Predicting LangSAM mask for '%s'.", category)
+        logger.info("Predicting SAM3 mask for '%s'.", category)
         lang_mask_raw = _predict_mask_lang_sam(
             lang_sam_model,
             image,
@@ -199,7 +199,7 @@ def _select_mask_for_object(
     score_lang = None
     if sam.mask_mode == "lang_sam":
         if lang_mask is None:
-            raise RuntimeError(f"LangSAM did not return a mask for '{category}'.")
+            raise RuntimeError(f"SAM3 did not return a mask for '{category}'.")
         selected_mask = lang_mask
         selected_method = "lang_sam"
         score_lang = _score_mask(
@@ -389,12 +389,12 @@ def run_pipeline(config: RunConfig, pipe=None, predictor=None) -> None:
     lang_sam_model = None
     if config.sam.mask_mode in ("lang_sam", "auto"):
         try:
-            logger.info("Loading LangSAM model for text-guided masks.")
+            logger.info("Loading SAM3 model for text-guided masks.")
             lang_sam_model = _load_lang_sam_model(config.device)
         except Exception as exc:
             if config.sam.mask_mode == "lang_sam":
-                raise RuntimeError("Failed to load LangSAM for text-guided masks.") from exc
-            logger.warning("LangSAM unavailable; falling back to SAM masks. (%s)", exc)
+                raise RuntimeError("Failed to load SAM3 for text-guided masks.") from exc
+            logger.warning("SAM3 unavailable; falling back to SAM masks. (%s)", exc)
 
     pairs_root = output_dir / "pairs"
     pairs_root.mkdir(parents=True, exist_ok=True)
