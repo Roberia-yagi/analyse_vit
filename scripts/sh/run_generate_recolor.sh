@@ -15,9 +15,8 @@ find_latest_run_dir() {
 }
 
 python -m analyse_vit.rare_colour_bias.image_generation \
-  --pipeline sd3 \
+  --pipeline qwen \
   --output-dir "$PROJECT_ROOT/results/raw/image_generation" \
-  --background-prompt "A grass field" \
   --base-prompt-elements-json "$PROJECT_ROOT/data/prompt_seeds/kangaroo/real_kangaroo_prompt_seeds.json" \
   --paired-prompt-elements-json "$PROJECT_ROOT/data/prompt_seeds/kangaroo/paired_kangaroo_prompt_seeds.json" \
   --seed-bg 123 \
@@ -31,15 +30,12 @@ if [[ -z "$RUN_ROOT" ]]; then
   exit 1
 fi
 
-python -m analyse_vit.rare_colour_bias.image_composite \
+python -m analyse_vit.rare_colour_bias.image_recolor \
   --run-root "$RUN_ROOT" \
   --object-name-real "kangaroo" \
   --object-name-toy "toy" \
-  --dominant-color "brown" \
-  --rare-color "pink" \
-  --seed-real 456 \
-  --seed-toy 789 \
-  --sam-checkpoint "$PROJECT_ROOT/models/sam/sam_vit_h_4b8939.pth" \
+  --normal-color "brown" \
+  --atypical-color "pink" \
   --lang-sam-box-threshold 0.25 \
   --lang-sam-text-threshold 0.25 \
-  --num-runs 10
+  --mask-dilate-px 9 \

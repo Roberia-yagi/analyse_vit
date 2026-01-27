@@ -282,6 +282,7 @@ def _generate_images(
     guidance_scale: Optional[float],
     max_sequence_length: int,
     device: str,
+    negative_prompt: Optional[str] = None,
 ) -> list[Image.Image]:
     import torch
 
@@ -295,6 +296,9 @@ def _generate_images(
     sig = inspect.signature(pipe.__call__)
     has_true_cfg = "true_cfg_scale" in sig.parameters
     has_negative = "negative_prompt" in sig.parameters
+    neg = negative_prompt.strip() if isinstance(negative_prompt, str) else None
+    if neg == "":
+        neg = None
 
     if len(prompt_list) == 1:
         generator = torch.Generator(device=device).manual_seed(seed_list[0])
@@ -310,8 +314,8 @@ def _generate_images(
             call_kwargs["guidance_scale"] = guidance_scale
             if has_true_cfg:
                 call_kwargs["true_cfg_scale"] = guidance_scale
-                if has_negative:
-                    call_kwargs.setdefault("negative_prompt", "")
+        if guidance_scale is not None and has_negative and neg is not None:
+            call_kwargs["negative_prompt"] = neg
         call_kwargs = _filter_kwargs_for_callable(pipe.__call__, call_kwargs)
         result = pipe(**call_kwargs)
         return [result.images[0]]
@@ -329,8 +333,8 @@ def _generate_images(
         call_kwargs["guidance_scale"] = guidance_scale
         if has_true_cfg:
             call_kwargs["true_cfg_scale"] = guidance_scale
-            if has_negative:
-                call_kwargs.setdefault("negative_prompt", [""] * len(prompt_list))
+    if guidance_scale is not None and has_negative and neg is not None:
+        call_kwargs["negative_prompt"] = [neg] * len(prompt_list)
 
     call_kwargs = _filter_kwargs_for_callable(pipe.__call__, call_kwargs)
     result = pipe(**call_kwargs)

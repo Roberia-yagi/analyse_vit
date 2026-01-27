@@ -50,10 +50,15 @@ def _parse_args(
     parser.add_argument(
         "--background-prompt",
         default=None,
-        help="Background prompt (required for generation runs; optional for composite-only runs).",
+        help="Background prompt (optional; if omitted, background image is not generated).",
     )
     parser.add_argument("--base-prompt", default=None)
     parser.add_argument("--paired-prompt", default=None)
+    parser.add_argument(
+        "--negative-prompt",
+        default=None,
+        help="Negative prompt (only used to enable guidance_scale for flux/sd3).",
+    )
     parser.add_argument(
         "--object-name",
         default=None,
@@ -143,21 +148,26 @@ def _parse_args(
 
     base_prompt = args.base_prompt
     paired_prompt = args.paired_prompt
+    negative_prompt = args.negative_prompt
+    if negative_prompt is not None and not negative_prompt.strip():
+        negative_prompt = None
 
     require_generation = mode in {"generate", "full"}
     require_composite = mode in {"composite", "full"}
 
+    background_prompt = args.background_prompt
+    if background_prompt is not None and not background_prompt.strip():
+        background_prompt = None
+
     if require_generation:
         if output_dir is None:
             raise ValueError("--output-dir is required for generation runs.")
-        if args.background_prompt is None:
-            raise ValueError("--background-prompt is required for generation runs.")
         if base_prompt_elements_path is None and base_prompt is None:
             raise ValueError("--base-prompt or --base-prompt-elements-json must be provided.")
         if paired_prompt_elements_path is None and paired_prompt is None:
             raise ValueError("--paired-prompt or --paired-prompt-elements-json must be provided.")
-        if args.seed_bg is None:
-            raise ValueError("--seed-bg is required for generation runs.")
+        if background_prompt is not None and args.seed_bg is None:
+            raise ValueError("--seed-bg is required when --background-prompt is provided.")
 
     if require_composite:
         if args.dominant_color is None:
@@ -173,8 +183,6 @@ def _parse_args(
         output_dir = run_root_override
     base_prompt = base_prompt or ""
     paired_prompt = paired_prompt or ""
-    background_prompt = args.background_prompt or ""
-
     if not (0.0 <= args.anchor_x <= 1.0 and 0.0 <= args.anchor_y <= 1.0):
         raise ValueError("--anchor-x/--anchor-y must be in [0, 1].")
     if args.target_obj_height_ratio <= 0.0:
@@ -267,9 +275,10 @@ def _parse_args(
     return (
         RunConfig(
             output_dir=output_dir,
-            background_prompt=str(background_prompt),
+            background_prompt=background_prompt,
             base_prompt=base_prompt,
             paired_prompt=paired_prompt,
+            negative_prompt=negative_prompt,
             object_name_real=object_name_real,
             object_name_toy=object_name_toy,
             base_prompt_elements_path=base_prompt_elements_path,

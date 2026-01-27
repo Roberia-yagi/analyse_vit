@@ -52,9 +52,10 @@ class ColorParams:
 @dataclass
 class RunConfig:
     output_dir: Path
-    background_prompt: str
+    background_prompt: Optional[str]
     base_prompt: str
     paired_prompt: str
+    negative_prompt: Optional[str]
     object_name_real: Optional[str]
     object_name_toy: Optional[str]
     base_prompt_elements_path: Optional[Path]
@@ -103,7 +104,6 @@ class ColorTransform:
     value_scale: Optional[float]
     value_lift: Optional[float]
 
-
 _PIPELINES: Dict[str, Dict[str, Any]] = {
     "flux": {
         "default_model_id": "black-forest-labs/FLUX.1-dev",
@@ -125,7 +125,7 @@ _PIPELINES: Dict[str, Dict[str, Any]] = {
     },
     "qwen": {
         "default_model_id": "Qwen/Qwen-Image-2512",
-        "defaults": {"num_inference_steps": 50, "guidance_scale": 4.0, "resolution": (1024, 1024)},
+        "defaults": {"num_inference_steps": 50, "guidance_scale": 4.0, "resolution": (1328, 1328)},
         "model_overrides": {
             # Intentionally empty: default model matches pipeline defaults.
         },

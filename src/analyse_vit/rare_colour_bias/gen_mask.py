@@ -49,7 +49,13 @@ def _area_frac_u8(mask_u8: np.ndarray) -> float:
     return float(np.mean(mask_u8 > 0))
 
 
-def _postprocess_mask(mask: np.ndarray, morph_kernel_px: int) -> np.ndarray:
+def _postprocess_mask(
+    mask: np.ndarray,
+    morph_kernel_px: int,
+    *,
+    dilate_kernel_px: int = 0,
+    max_dilate_increase: float = 0.25,
+) -> np.ndarray:
     import cv2
 
     max_fill_increase = 0.10
@@ -65,10 +71,21 @@ def _postprocess_mask(mask: np.ndarray, morph_kernel_px: int) -> np.ndarray:
         closed = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel)
         if _area_frac_u8(closed) <= _area_frac_u8(mask_u8) * (1.0 + max_close_increase):
             mask_u8 = closed
+    if dilate_kernel_px > 1:
+        kernel = np.ones((dilate_kernel_px, dilate_kernel_px), np.uint8)
+        dilated = cv2.dilate(mask_u8, kernel, iterations=1)
+        if _area_frac_u8(dilated) <= _area_frac_u8(mask_u8) * (1.0 + max_dilate_increase):
+            mask_u8 = dilated
     return (mask_u8.astype(np.float32) / 255.0).clip(0.0, 1.0)
 
 
-def _postprocess_mask_debug(mask: np.ndarray, morph_kernel_px: int) -> dict[str, np.ndarray]:
+def _postprocess_mask_debug(
+    mask: np.ndarray,
+    morph_kernel_px: int,
+    *,
+    dilate_kernel_px: int = 0,
+    max_dilate_increase: float = 0.25,
+) -> dict[str, np.ndarray]:
     import cv2
 
     max_fill_increase = 0.10
@@ -89,12 +106,19 @@ def _postprocess_mask_debug(mask: np.ndarray, morph_kernel_px: int) -> dict[str,
         closed = closed_raw
     else:
         closed = filled
-    post = (closed.astype(np.float32) / 255.0).clip(0.0, 1.0)
+    dilated = closed
+    if dilate_kernel_px > 1:
+        kernel = np.ones((dilate_kernel_px, dilate_kernel_px), np.uint8)
+        dilated_raw = cv2.dilate(closed, kernel, iterations=1)
+        if _area_frac_u8(dilated_raw) <= _area_frac_u8(closed) * (1.0 + max_dilate_increase):
+            dilated = dilated_raw
+    post = (dilated.astype(np.float32) / 255.0).clip(0.0, 1.0)
     return {
         "binary": binary.astype(np.float32) / 255.0,
         "largest": largest.astype(np.float32) / 255.0,
         "filled": filled.astype(np.float32) / 255.0,
         "closed": closed.astype(np.float32) / 255.0,
+        "dilated": dilated.astype(np.float32) / 255.0,
         "post": post,
     }
 

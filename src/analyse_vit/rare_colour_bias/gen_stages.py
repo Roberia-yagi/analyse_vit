@@ -78,11 +78,20 @@ def _run_generation(run_configs: list[RunConfig], pipe=None):
             base.flux.local_files_only,
         )
 
-    guidance_scale = None if base.flux.pipeline == "qwen" else base.flux.guidance_scale
+    negative_prompt = base.negative_prompt
+    if negative_prompt is not None and not negative_prompt.strip():
+        negative_prompt = None
+
+    if base.flux.pipeline in {"flux", "sd3", "qwen"}:
+        guidance_scale = base.flux.guidance_scale if negative_prompt else None
+    else:
+        guidance_scale = base.flux.guidance_scale
+
+    has_background_prompt = bool(base.background_prompt)
 
     # Background generation: preserve prior behavior
     shared_bg: Optional[Image.Image] = None
-    if len(run_states) > 1:
+    if has_background_prompt and len(run_states) > 1:
         _, _, base_logger = run_states[0]
         base_logger.info("Generating shared background image once (single forward).")
         base_logger.info("Waiting for diffusion inference (this can take a while)...")
@@ -101,25 +110,30 @@ def _run_generation(run_configs: list[RunConfig], pipe=None):
         base_logger.info("Shared background generation finished in %.2fs.", time.perf_counter() - start)
 
     for cfg, run_dirs, logger in run_states:
-        if shared_bg is None:
-            logger.info("Generating background image (single forward).")
-            logger.info("Waiting for diffusion inference (this can take a while)...")
-            start = time.perf_counter()
-            bg_image = _generate_images(
-                pipe,
-                [cfg.background_prompt],
-                [cfg.seed_bg],
-                cfg.flux.width,
-                cfg.flux.height,
-                cfg.flux.num_inference_steps,
-                guidance_scale,
-                cfg.flux.max_sequence_length,
-                cfg.device,
-            )[0]
-            logger.info("Background generation finished in %.2fs.", time.perf_counter() - start)
+        bg_image: Optional[Image.Image] = None
+        if has_background_prompt:
+            if shared_bg is None:
+                logger.info("Generating background image (single forward).")
+                logger.info("Waiting for diffusion inference (this can take a while)...")
+                start = time.perf_counter()
+                bg_image = _generate_images(
+                    pipe,
+                    [cfg.background_prompt],
+                    [cfg.seed_bg],
+                    cfg.flux.width,
+                    cfg.flux.height,
+                    cfg.flux.num_inference_steps,
+                    guidance_scale,
+                    cfg.flux.max_sequence_length,
+                    cfg.device,
+                    negative_prompt,
+                )[0]
+                logger.info("Background generation finished in %.2fs.", time.perf_counter() - start)
+            else:
+                bg_image = shared_bg
+                logger.info("Reusing shared background image for this run.")
         else:
-            bg_image = shared_bg
-            logger.info("Reusing shared background image for this run.")
+            logger.info("Skipping background generation because --background-prompt was not provided.")
 
         if cfg.flux.pipeline == "qwen":
             logger.info("Generating anchor images sequentially (qwen uses more VRAM per sample).")
@@ -135,6 +149,7 @@ def _run_generation(run_configs: list[RunConfig], pipe=None):
                 guidance_scale,
                 cfg.flux.max_sequence_length,
                 cfg.device,
+                negative_prompt,
             )[0]
             logger.info("Real anchor finished in %.2fs.", time.perf_counter() - start)
 
@@ -150,6 +165,7 @@ def _run_generation(run_configs: list[RunConfig], pipe=None):
                 guidance_scale,
                 cfg.flux.max_sequence_length,
                 cfg.device,
+                negative_prompt,
             )[0]
             logger.info("Toy anchor finished in %.2fs.", time.perf_counter() - start)
         else:
@@ -166,11 +182,13 @@ def _run_generation(run_configs: list[RunConfig], pipe=None):
                 guidance_scale,
                 cfg.flux.max_sequence_length,
                 cfg.device,
+                negative_prompt,
             )
             logger.info("Anchor generation finished in %.2fs.", time.perf_counter() - start)
 
         logger.info("Saving generated inputs...")
-        bg_image.save(run_dirs.inputs / "bg.png")
+        if bg_image is not None:
+            bg_image.save(run_dirs.inputs / "bg.png")
         real_anchor_image.save(run_dirs.inputs / "real_anchor.png")
         toy_anchor_image.save(run_dirs.inputs / "toy_anchor.png")
         logger.info("Saved generated inputs to %s", run_dirs.inputs)
@@ -367,6 +385,7 @@ def _run_sam_stage(config: RunConfig, predictor=None, lang_sam_model=None) -> No
         "background_prompt": config.background_prompt,
         "base_prompt": config.base_prompt,
         "paired_prompt": config.paired_prompt,
+        "negative_prompt": config.negative_prompt,
         "object_name_real": config.object_name_real,
         "object_name_toy": config.object_name_toy,
         "object_name": (
