@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 
 from .gen_mask import _select_mask, _select_mask_by_score
-from .gen_utils import _get_hf_token
+from ..generation.gen_utils import _get_hf_token
 
 
 def _maybe_login_hf(token: Optional[str]) -> None:
@@ -367,5 +367,4 @@ def _predict_mask_lang_sam(
         return _select_best_score_mask(masks_np, scores_np, center_xy)
     center_xy = (image.width // 2, image.height // 2)
     return _select_lang_sam_mask(masks_np, scores_np, center_xy, mask_selection_rule)
-
 

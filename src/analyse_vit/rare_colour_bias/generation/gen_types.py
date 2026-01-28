@@ -53,26 +53,20 @@ class ColorParams:
 class RunConfig:
     output_dir: Path
     background_prompt: Optional[str]
-    base_prompt: str
-    paired_prompt: str
+    prompt: str
     negative_prompt: Optional[str]
-    object_name_real: Optional[str]
-    object_name_toy: Optional[str]
-    base_prompt_elements_path: Optional[Path]
-    paired_prompt_elements_path: Optional[Path]
-    base_prompt_elements: Optional[Dict[str, str]]
-    paired_prompt_elements: Optional[Dict[str, str]]
-    dominant_color: str
-    rare_color: str
+    object_name: Optional[str]
+    prompt_elements_path: Optional[Path]
+    prompt_elements: Optional[Dict[str, str]]
+    color_name: str
     seed_bg: int
-    seed_real: int
-    seed_toy: int
+    seed: int
     run_index: int
     seed_offset: int
     flux: FluxParams
     sam: SamParams
     composite: CompositeParams
-    color: ColorParams
+    color_params: ColorParams
     device: str
     hf_token: Optional[str]
 

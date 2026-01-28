@@ -5,7 +5,7 @@ from typing import Optional
 import numpy as np
 from PIL import Image
 
-from .gen_types import ColorTransform, _COLOR_ALIASES, _COLOR_TRANSFORMS_CANONICAL
+from ..generation.gen_types import ColorTransform, _COLOR_ALIASES, _COLOR_TRANSFORMS_CANONICAL
 
 
 def _resolve_color_transform(color_name: str, fallback_hue_deg: Optional[float]) -> ColorTransform:

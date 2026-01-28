@@ -1,25 +1,38 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=run_composite_only
+#SBATCH --job-name=run_generate_only_all_animals
 #SBATCH --chdir=/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=128G
-#SBATCH --time=00:30:00
+#SBATCH --time=03:00:00
 
 set -euo pipefail
 
 PROJECT_ROOT="${PWD}"
 source "$PROJECT_ROOT/scripts/sbatch/utils/race_guard.sh"
-RUN_SCRIPT="$PROJECT_ROOT/scripts/sh/run_composite_only.sh"
-RESULTS_DIR="${RESULTS_DIR:-}"
+RUN_SCRIPT="$PROJECT_ROOT/scripts/sh/run_generate_only_all_animals.sh"
+RESULTS_DIR="${RESULTS_DIR:-$PROJECT_ROOT/results}"
 if [[ -z "$RESULTS_DIR" || "$RESULTS_DIR" != /* ]]; then
-  echo "Error: RESULTS_DIR must be set to an absolute path: $RESULTS_DIR" >&2
+  echo "Error: RESULTS_DIR must be an absolute path: $RESULTS_DIR" >&2
   exit 1
 fi
 if [[ ! -d "$RESULTS_DIR" ]]; then
   echo "Error: RESULTS_DIR not found (absolute path required): $RESULTS_DIR" >&2
   exit 1
 fi
+TARGET_RESULTS_DIR="$RESULTS_DIR/raw/anchors"
+
+# Mirror scripts/sh/run_generate_only_all_animals.sh (data/*.json determines animals).
+mapfile -t PROMPT_JSONS < <(find "$PROJECT_ROOT/data" -maxdepth 1 -type f -name "*.json" | sort)
+if [[ ${#PROMPT_JSONS[@]} -eq 0 ]]; then
+  echo "No prompt JSON files found in $PROJECT_ROOT/data" >&2
+  exit 1
+fi
+
+ANIMALS=()
+for prompt_json in "${PROMPT_JSONS[@]}"; do
+  ANIMALS+=("$(basename "$prompt_json" .json)")
+done
 
 find_latest_run_dir() {
   local base_dir="$1"
@@ -49,10 +62,13 @@ copy_sources() {
 cd "$PROJECT_ROOT"
 export PYTHONUNBUFFERED=1
 
-uv run --extra generate -- bash "$RUN_SCRIPT" "$RESULTS_DIR"
+uv run --extra generate -- bash "$RUN_SCRIPT"
 
-if [[ -d "$RESULTS_DIR" ]]; then
-  copy_sources "$RESULTS_DIR" "$RUN_SCRIPT"
-else
-  echo "Warning: results run directory not found: $RESULTS_DIR" >&2
-fi
+for animal in "${ANIMALS[@]}"; do
+  run_root="$(find_latest_run_dir "$TARGET_RESULTS_DIR/$animal/flux" || true)"
+  if [[ -n "$run_root" ]]; then
+    copy_sources "$run_root" "$RUN_SCRIPT"
+  else
+    echo "Warning: results run directory not found under $TARGET_RESULTS_DIR/$animal/flux" >&2
+  fi
+done

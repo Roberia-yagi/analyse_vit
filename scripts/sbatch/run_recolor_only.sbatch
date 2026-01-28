@@ -12,16 +12,12 @@ PROJECT_ROOT="${PWD}"
 source "$PROJECT_ROOT/scripts/sbatch/utils/race_guard.sh"
 RUN_SCRIPT="$PROJECT_ROOT/scripts/sh/run_recolor_only.sh"
 RESULTS_DIR="${RESULTS_DIR:-}"
-if [[ -z "$RESULTS_DIR" ]]; then
-  echo "Error: set RESULTS_DIR to an absolute run root path (e.g., /.../results/raw/image_generation/20260123_170000)." >&2
-  exit 1
-fi
-if [[ "$RESULTS_DIR" != /* ]]; then
-  echo "Error: RESULTS_DIR must be an absolute path: $RESULTS_DIR" >&2
+if [[ -z "$RESULTS_DIR" || "$RESULTS_DIR" != /* ]]; then
+  echo "Error: RESULTS_DIR must be set to an absolute path: $RESULTS_DIR" >&2
   exit 1
 fi
 if [[ ! -d "$RESULTS_DIR" ]]; then
-  echo "Error: run root directory not found: $RESULTS_DIR" >&2
+  echo "Error: RESULTS_DIR not found (absolute path required): $RESULTS_DIR" >&2
   exit 1
 fi
 

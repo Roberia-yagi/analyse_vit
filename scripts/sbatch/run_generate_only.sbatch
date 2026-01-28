@@ -11,7 +11,16 @@ set -euo pipefail
 PROJECT_ROOT="${PWD}"
 source "$PROJECT_ROOT/scripts/sbatch/utils/race_guard.sh"
 RUN_SCRIPT="$PROJECT_ROOT/scripts/sh/run_generate_only.sh"
-RESULTS_DIR="$PROJECT_ROOT/results/raw/image_generation"
+RESULTS_DIR="${RESULTS_DIR:-$PROJECT_ROOT/results}"
+if [[ -z "$RESULTS_DIR" || "$RESULTS_DIR" != /* ]]; then
+  echo "Error: RESULTS_DIR must be an absolute path: $RESULTS_DIR" >&2
+  exit 1
+fi
+if [[ ! -d "$RESULTS_DIR" ]]; then
+  echo "Error: RESULTS_DIR not found (absolute path required): $RESULTS_DIR" >&2
+  exit 1
+fi
+TARGET_RESULTS_DIR="$RESULTS_DIR/raw/anchors/eagle/flux"
 
 find_latest_run_dir() {
   local base_dir="$1"
@@ -43,9 +52,9 @@ export PYTHONUNBUFFERED=1
 
 uv run --extra generate -- bash "$RUN_SCRIPT"
 
-run_root="$(find_latest_run_dir "$RESULTS_DIR" || true)"
+run_root="$(find_latest_run_dir "$TARGET_RESULTS_DIR" || true)"
 if [[ -n "$run_root" ]]; then
   copy_sources "$run_root" "$RUN_SCRIPT"
 else
-  echo "Warning: results run directory not found under $PROJECT_ROOT/results" >&2
+  echo "Warning: results run directory not found under $TARGET_RESULTS_DIR" >&2
 fi

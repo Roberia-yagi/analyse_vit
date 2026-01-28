@@ -45,13 +45,14 @@ analysis-perception = [
 ]
 analysis-qwen = [
   "torch",
-  "transformers @ git+https://github.com/huggingface/transformers.git",
+  "transformers>=4.56.0,<5",
+  "vllm>=0.14.0",
   "accelerate",
+  "qwen-vl-utils",
   "sentencepiece",
   "protobuf",
   "torchvision",
   "safetensors",
-  "open_clip_torch==2.30.0",
   "matplotlib",
   "scikit-learn",
   "decord",

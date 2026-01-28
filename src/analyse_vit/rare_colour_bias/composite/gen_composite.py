@@ -6,7 +6,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 
 from .gen_mask import _compute_bbox
-from .gen_types import CompositeParams, TransformInfo
+from ..generation.gen_types import CompositeParams, TransformInfo
 
 
 def _compute_transform(

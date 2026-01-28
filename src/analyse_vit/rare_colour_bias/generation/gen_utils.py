@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import getpass
 import inspect
 import logging
 import os
+import platform
+import subprocess
 import sys
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from PIL import Image
 
@@ -109,6 +112,134 @@ def _get_cv2_version() -> Optional[str]:
     import cv2
 
     return getattr(cv2, "__version__", None)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+def _collect_env_snapshot() -> Dict[str, Optional[str]]:
+    keys = (
+        "CUDA_VISIBLE_DEVICES",
+        "CUDA_DEVICE_ORDER",
+        "NVIDIA_VISIBLE_DEVICES",
+        "HF_HOME",
+        "HUGGINGFACE_HUB_CACHE",
+        "TRANSFORMERS_CACHE",
+        "HF_DATASETS_CACHE",
+        "TORCH_HOME",
+        "PYTHONHASHSEED",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    )
+    return {key: os.getenv(key) for key in keys}
+
+
+def _collect_torch_info() -> Dict[str, Any]:
+    try:
+        import torch
+    except Exception:
+        return {"available": False}
+
+    info: Dict[str, Any] = {
+        "available": True,
+        "torch_version": getattr(torch, "__version__", None),
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_version": getattr(torch.version, "cuda", None),
+        "cudnn_version": torch.backends.cudnn.version() if torch.backends.cudnn.is_available() else None,
+        "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+    }
+    if torch.cuda.is_available():
+        devices = []
+        for idx in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(idx)
+            devices.append(
+                {
+                    "index": idx,
+                    "name": props.name,
+                    "total_memory_bytes": props.total_memory,
+                    "major": props.major,
+                    "minor": props.minor,
+                }
+            )
+        info["cuda_devices"] = devices
+    return info
+
+
+def _collect_git_info(start: Path) -> Dict[str, Any]:
+    repo_root = _find_repo_root(start)
+    if repo_root is None:
+        return {}
+
+    def _git(args: Iterable[str]) -> Optional[str]:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+    status = _git(["status", "--porcelain"])
+    status_lines = status.splitlines() if status else []
+    return {
+        "repo_root": str(repo_root),
+        "commit": _git(["rev-parse", "HEAD"]),
+        "branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]),
+        "describe": _git(["describe", "--tags", "--always", "--dirty"]),
+        "status_porcelain": status_lines,
+    }
+
+
+def _collect_runtime_info(start: Optional[Path] = None) -> Dict[str, Any]:
+    info = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "user": getpass.getuser(),
+        "cwd": os.getcwd(),
+        "python": {
+            "version": sys.version,
+            "executable": sys.executable,
+        },
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "version": platform.version(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+        },
+        "env": _collect_env_snapshot(),
+        "torch": _collect_torch_info(),
+        "library_versions": {
+            "torch": _get_version("torch"),
+            "diffusers": _get_version("diffusers"),
+            "transformers": _get_version("transformers"),
+            "accelerate": _get_version("accelerate"),
+            "safetensors": _get_version("safetensors"),
+            "huggingface_hub": _get_version("huggingface_hub"),
+            "segment_anything": _get_version("segment-anything"),
+            "segment_anything_alt": _get_version("segment-anything-py"),
+            "opencv": _get_cv2_version() or _get_version("opencv-python"),
+            "numpy": _get_version("numpy"),
+            "Pillow": _get_version("Pillow"),
+        },
+    }
+    if start is not None:
+        info["git"] = _collect_git_info(start)
+    return info
 
 
 def _load_required_rgb_image(path: Path) -> Image.Image:

@@ -2,7 +2,15 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RESULTS_DIR="$PROJECT_ROOT/results/raw/image_generation"
+RESULTS_DIR="${RESULTS_DIR:-$PROJECT_ROOT/results/raw/anchors/kangaroo/qwen}"
+if [[ -z "$RESULTS_DIR" || "$RESULTS_DIR" != /* ]]; then
+  echo "Error: RESULTS_DIR must be an absolute path: $RESULTS_DIR" >&2
+  exit 1
+fi
+if [[ ! -d "$RESULTS_DIR" ]]; then
+  echo "Error: RESULTS_DIR not found (absolute path required): $RESULTS_DIR" >&2
+  exit 1
+fi
 
 RUN_ROOT_ARG="${1:-}"
 if [[ -z "$RUN_ROOT_ARG" ]]; then
@@ -19,12 +27,15 @@ else
   exit 1
 fi
 
-python -m analyse_vit.rare_colour_bias.image_recolor \
+case "$RUN_ROOT" in
+  "$RESULTS_DIR"|"$RESULTS_DIR"/*) ;;
+  *) echo "Error: RUN_ROOT must be under RESULTS_DIR ($RESULTS_DIR): $RUN_ROOT" >&2; exit 1 ;;
+esac
+
+python -m analyse_vit.rare_colour_bias.recolor.image_recolor \
   --run-root "$RUN_ROOT" \
-  --object-name-real "kangaroo" \
-  --object-name-toy "toy" \
-  --normal-color "brown" \
-  --atypical-color "pink" \
+  --object-name "kangaroo" \
+  --color "pink" \
   --lang-sam-box-threshold 0.25 \
   --lang-sam-text-threshold 0.25 \
   --mask-dilate-px 9 \

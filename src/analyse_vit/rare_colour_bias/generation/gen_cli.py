@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
-from .gen_color import _resolve_color_transform
+from ..composite.gen_color import _resolve_color_transform
 from .gen_pipeline import (
     _default_model_id_for,
     _load_text2image_pipeline,
@@ -16,8 +16,8 @@ from .gen_pipeline import (
     _resolve_generation_resolution,
 )
 from .gen_prompts import _generate_prompt_set, _load_prompt_elements
-from .gen_sam import _load_lang_sam_model
-from .gen_stages import _run_generation, _run_sam_stage
+from ..composite.gen_sam import _load_lang_sam_model
+from ..composite.gen_stages import _run_generation, _run_sam_stage
 from .gen_types import (
     ColorParams,
     CompositeParams,
@@ -52,8 +52,7 @@ def _parse_args(
         default=None,
         help="Background prompt (optional; if omitted, background image is not generated).",
     )
-    parser.add_argument("--base-prompt", default=None)
-    parser.add_argument("--paired-prompt", default=None)
+    parser.add_argument("--prompt", default=None)
     parser.add_argument(
         "--negative-prompt",
         default=None,
@@ -62,33 +61,16 @@ def _parse_args(
     parser.add_argument(
         "--object-name",
         default=None,
-        help="(deprecated) Object name to use for grounding SAM masks (use --object-name-real/--object-name-toy).",
+        help="Object name to use for grounding SAM masks.",
     )
     parser.add_argument(
-        "--object-name-real",
+        "--prompt-elements-json",
         default=None,
-        help="Object name to use for grounding SAM masks for real images.",
+        help="JSON file of prompt elements used to build a unique prompt per run.",
     )
-    parser.add_argument(
-        "--object-name-toy",
-        default=None,
-        help="Object name to use for grounding SAM masks for toy images.",
-    )
-    parser.add_argument(
-        "--base-prompt-elements-json",
-        default=None,
-        help="JSON file of prompt elements used to build a unique base prompt per run.",
-    )
-    parser.add_argument(
-        "--paired-prompt-elements-json",
-        default=None,
-        help="JSON file of prompt elements used to build a unique paired prompt per run.",
-    )
-    parser.add_argument("--dominant-color", default=None)
-    parser.add_argument("--rare-color", default=None)
+    parser.add_argument("--color", default=None)
     parser.add_argument("--seed-bg", type=int, default=None)
-    parser.add_argument("--seed-real", type=int, required=True)
-    parser.add_argument("--seed-toy", type=int, required=True)
+    parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--num-runs", type=int, default=3)
 
     parser.add_argument("--pipeline", default="flux", choices=list(_PIPELINES.keys()))
@@ -128,7 +110,13 @@ def _parse_args(
     parser.add_argument("--scale-multiplier", type=float, default=1.0)
     parser.add_argument("--placement-mode", default="center", choices=["random", "anchor", "center"])
 
-    parser.add_argument("--target-hue-deg", type=float, default=None)
+    parser.add_argument("--color-hue-deg", type=float, default=None)
+    parser.add_argument(
+        "--target-hue-deg",
+        type=float,
+        default=None,
+        help="Deprecated: use --color-hue-deg.",
+    )
     parser.add_argument("--min-saturation", type=float, default=0.25)
 
     parser.add_argument("--device", default="cuda")
@@ -143,11 +131,8 @@ def _parse_args(
     run_root_override = _resolve_path(args.run_root) if args.run_root else None
     sam_checkpoint = _resolve_path(args.sam_checkpoint) if args.sam_checkpoint else None
 
-    base_prompt_elements_path = _resolve_path(args.base_prompt_elements_json) if args.base_prompt_elements_json else None
-    paired_prompt_elements_path = _resolve_path(args.paired_prompt_elements_json) if args.paired_prompt_elements_json else None
-
-    base_prompt = args.base_prompt
-    paired_prompt = args.paired_prompt
+    prompt_elements_path = _resolve_path(args.prompt_elements_json) if args.prompt_elements_json else None
+    prompt = args.prompt
     negative_prompt = args.negative_prompt
     if negative_prompt is not None and not negative_prompt.strip():
         negative_prompt = None
@@ -162,18 +147,14 @@ def _parse_args(
     if require_generation:
         if output_dir is None:
             raise ValueError("--output-dir is required for generation runs.")
-        if base_prompt_elements_path is None and base_prompt is None:
-            raise ValueError("--base-prompt or --base-prompt-elements-json must be provided.")
-        if paired_prompt_elements_path is None and paired_prompt is None:
-            raise ValueError("--paired-prompt or --paired-prompt-elements-json must be provided.")
+        if prompt_elements_path is None and prompt is None:
+            raise ValueError("--prompt or --prompt-elements-json must be provided.")
         if background_prompt is not None and args.seed_bg is None:
             raise ValueError("--seed-bg is required when --background-prompt is provided.")
 
     if require_composite:
-        if args.dominant_color is None:
-            raise ValueError("--dominant-color is required for composite runs.")
-        if args.rare_color is None:
-            raise ValueError("--rare-color is required for composite runs.")
+        if args.color is None:
+            raise ValueError("--color is required for composite runs.")
         if args.sam_checkpoint is None:
             raise ValueError("--sam-checkpoint is required for composite runs.")
 
@@ -181,8 +162,7 @@ def _parse_args(
         raise ValueError("--run-root is required for composite-only runs.")
     if output_dir is None and run_root_override is not None:
         output_dir = run_root_override
-    base_prompt = base_prompt or ""
-    paired_prompt = paired_prompt or ""
+    prompt = prompt or ""
     if not (0.0 <= args.anchor_x <= 1.0 and 0.0 <= args.anchor_y <= 1.0):
         raise ValueError("--anchor-x/--anchor-y must be in [0, 1].")
     if args.target_obj_height_ratio <= 0.0:
@@ -197,14 +177,14 @@ def _parse_args(
         raise ValueError("--num-runs must be > 0.")
     if args.model_id and args.flux_model_id and args.model_id != args.flux_model_id:
         raise ValueError("--model-id and --flux-model-id must match if both are set.")
-    object_name_real = args.object_name_real or args.object_name
-    object_name_toy = args.object_name_toy or args.object_name
-    if require_composite and args.sam_prompt_mode == "grounding" and (not object_name_real or not object_name_toy):
-        raise ValueError(
-            "--object-name-real and --object-name-toy are required when --sam-prompt-mode grounding is used."
-        )
-    if require_composite and args.target_hue_deg is None and args.rare_color is not None:
-        _resolve_color_transform(args.rare_color, None)
+    object_name = args.object_name
+    if require_composite and args.sam_prompt_mode == "grounding" and not object_name:
+        raise ValueError("--object-name is required when --sam-prompt-mode grounding is used.")
+    if require_composite:
+        if args.color_hue_deg is not None and args.target_hue_deg is not None:
+            if args.color_hue_deg != args.target_hue_deg:
+                raise ValueError("--color-hue-deg and --target-hue-deg must match when both are set.")
+        _resolve_color_transform(args.color or "", args.color_hue_deg or args.target_hue_deg)
 
     env_file = _resolve_path(args.env_file) if args.env_file else None
     if env_file is None:
@@ -267,8 +247,10 @@ def _parse_args(
         placement_mode=str(args.placement_mode),
     )
 
-    color = ColorParams(
-        target_hue_deg=float(args.target_hue_deg) if args.target_hue_deg is not None else None,
+    color_params = ColorParams(
+        target_hue_deg=float(args.color_hue_deg)
+        if args.color_hue_deg is not None
+        else (float(args.target_hue_deg) if args.target_hue_deg is not None else None),
         min_saturation=float(args.min_saturation),
     )
 
@@ -276,26 +258,20 @@ def _parse_args(
         RunConfig(
             output_dir=output_dir,
             background_prompt=background_prompt,
-            base_prompt=base_prompt,
-            paired_prompt=paired_prompt,
+            prompt=prompt,
             negative_prompt=negative_prompt,
-            object_name_real=object_name_real,
-            object_name_toy=object_name_toy,
-            base_prompt_elements_path=base_prompt_elements_path,
-            paired_prompt_elements_path=paired_prompt_elements_path,
-            base_prompt_elements=None,
-            paired_prompt_elements=None,
-            dominant_color=str(args.dominant_color or ""),
-            rare_color=str(args.rare_color or ""),
+            object_name=object_name,
+            prompt_elements_path=prompt_elements_path,
+            prompt_elements=None,
+            color_name=str(args.color or ""),
             seed_bg=int(args.seed_bg) if args.seed_bg is not None else 0,
-            seed_real=int(args.seed_real),
-            seed_toy=int(args.seed_toy),
+            seed=int(args.seed),
             run_index=0,
             seed_offset=0,
             flux=flux,
             sam=sam,
             composite=composite,
-            color=color,
+            color_params=color_params,
             device=str(args.device),
             hf_token=hf_token,
         ),
@@ -310,27 +286,17 @@ def _prepare_prompt_sets(
 ) -> Tuple[
     Optional[list[str]],
     Optional[list[dict[str, str]]],
-    Optional[list[str]],
-    Optional[list[dict[str, str]]],
 ]:
     joiner = ", "
-    base_prompts: Optional[list[str]] = None
-    base_prompt_elements: Optional[list[dict[str, str]]] = None
-    if config.base_prompt_elements_path is not None:
-        base_keys, base_groups = _load_prompt_elements(config.base_prompt_elements_path)
-        base_prompts, base_prompt_elements = _generate_prompt_set(
-            base_keys, base_groups, num_runs, config.seed_real, 0xBADDCAFE, joiner, "Base prompt"
+    prompts: Optional[list[str]] = None
+    prompt_elements: Optional[list[dict[str, str]]] = None
+    if config.prompt_elements_path is not None:
+        keys, groups = _load_prompt_elements(config.prompt_elements_path)
+        prompts, prompt_elements = _generate_prompt_set(
+            keys, groups, num_runs, config.seed, 0xBADDCAFE, joiner, "Prompt"
         )
 
-    paired_prompts: Optional[list[str]] = None
-    paired_prompt_elements: Optional[list[dict[str, str]]] = None
-    if config.paired_prompt_elements_path is not None:
-        paired_keys, paired_groups = _load_prompt_elements(config.paired_prompt_elements_path)
-        paired_prompts, paired_prompt_elements = _generate_prompt_set(
-            paired_keys, paired_groups, num_runs, config.seed_toy, 0xDEADBEEF, joiner, "Paired prompt"
-        )
-
-    return base_prompts, base_prompt_elements, paired_prompts, paired_prompt_elements
+    return prompts, prompt_elements
 
 
 def _build_run_configs(
@@ -338,30 +304,24 @@ def _build_run_configs(
     num_runs: int,
     run_root: Path,
 ) -> list[RunConfig]:
-    base_prompts, base_prompt_elements, paired_prompts, paired_prompt_elements = _prepare_prompt_sets(config, num_runs)
+    prompts, prompt_elements = _prepare_prompt_sets(config, num_runs)
 
     run_configs: list[RunConfig] = []
     for run_index in range(num_runs):
         run_dir = run_root / f"run_{run_index:02d}"
         seed_bg = _derive_run_seed(config.seed_bg, run_index, 0xA5A5A5A5)
-        seed_real = _derive_run_seed(config.seed_real, run_index, 0x5A5A5A5A)
-        seed_toy = _derive_run_seed(config.seed_toy, run_index, 0x12345678)
+        seed = _derive_run_seed(config.seed, run_index, 0x5A5A5A5A)
 
-        base_prompt = base_prompts[run_index] if base_prompts is not None else config.base_prompt
-        paired_prompt = paired_prompts[run_index] if paired_prompts is not None else config.paired_prompt
-        base_elements = base_prompt_elements[run_index] if base_prompt_elements is not None else None
-        paired_elements = paired_prompt_elements[run_index] if paired_prompt_elements is not None else None
+        prompt = prompts[run_index] if prompts is not None else config.prompt
+        elements = prompt_elements[run_index] if prompt_elements is not None else None
 
         run_config = replace(
             config,
             output_dir=run_dir,
             seed_bg=seed_bg,
-            seed_real=seed_real,
-            seed_toy=seed_toy,
-            base_prompt=base_prompt,
-            paired_prompt=paired_prompt,
-            base_prompt_elements=base_elements,
-            paired_prompt_elements=paired_elements,
+            seed=seed,
+            prompt=prompt,
+            prompt_elements=elements,
             run_index=run_index,
             seed_offset=run_index,
         )

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=run_generate_composite
+#SBATCH --job-name=run_recolor_only_all_anchors
 #SBATCH --chdir=/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=128G
-#SBATCH --time=00:30:00
+#SBATCH --time=02:00:00
 
 set -euo pipefail
 
 PROJECT_ROOT="${PWD}"
 source "$PROJECT_ROOT/scripts/sbatch/utils/race_guard.sh"
-RUN_SCRIPT="$PROJECT_ROOT/scripts/sh/run_generate_composite.sh"
+RUN_SCRIPT="$PROJECT_ROOT/scripts/sh/run_recolor_only_all_anchors.sh"
 RESULTS_DIR="${RESULTS_DIR:-$PROJECT_ROOT/results}"
 if [[ -z "$RESULTS_DIR" || "$RESULTS_DIR" != /* ]]; then
   echo "Error: RESULTS_DIR must be an absolute path: $RESULTS_DIR" >&2
@@ -20,22 +20,17 @@ if [[ ! -d "$RESULTS_DIR" ]]; then
   echo "Error: RESULTS_DIR not found (absolute path required): $RESULTS_DIR" >&2
   exit 1
 fi
-TARGET_RESULTS_DIR="$RESULTS_DIR/raw/anchors/kangaroo/flux"
 
-find_latest_run_dir() {
-  local base_dir="$1"
-  local latest
-  latest="$(ls -1dt "$base_dir"/[0-9]*_[0-9]*/ 2>/dev/null | head -n 1 || true)"
-  if [[ -z "$latest" ]]; then
-    return 1
-  fi
-  printf "%s" "${latest%/}"
-}
+RUN_SUBDIR="${RUN_SUBDIR:-}"
+if [[ "$RUN_SUBDIR" == /* ]]; then
+  echo "Error: RUN_SUBDIR must be relative to RESULTS_DIR: $RUN_SUBDIR" >&2
+  exit 1
+fi
 
 copy_sources() {
-  local run_root="$1"
+  local results_dir="$1"
   local run_script="$2"
-  local dest_dir="$run_root/source"
+  local dest_dir="$results_dir/source"
   local src_dir="$PROJECT_ROOT/src"
 
   mkdir -p "$dest_dir"
@@ -50,11 +45,16 @@ copy_sources() {
 cd "$PROJECT_ROOT"
 export PYTHONUNBUFFERED=1
 
-uv run --extra generate -- bash "$RUN_SCRIPT"
-
-run_root="$(find_latest_run_dir "$TARGET_RESULTS_DIR" || true)"
-if [[ -n "$run_root" ]]; then
-  copy_sources "$run_root" "$RUN_SCRIPT"
+if [[ -n "$RUN_SUBDIR" ]]; then
+  uv run --extra generate -- bash "$RUN_SCRIPT" "$RUN_SUBDIR"
+  RUN_ROOT="$RESULTS_DIR/$RUN_SUBDIR"
 else
-  echo "Warning: results run directory not found under $TARGET_RESULTS_DIR" >&2
+  uv run --extra generate -- bash "$RUN_SCRIPT"
+  RUN_ROOT="$RESULTS_DIR"
+fi
+
+if [[ -d "$RUN_ROOT" ]]; then
+  copy_sources "$RUN_ROOT" "$RUN_SCRIPT"
+else
+  echo "Warning: results run directory not found: $RUN_ROOT" >&2
 fi
