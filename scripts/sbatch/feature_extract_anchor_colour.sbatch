@@ -47,12 +47,17 @@ fi
 
 export RESULTS_DIR INPUT_SUBDIR
 export INPUT_DIR
-export MODELS="${MODELS:-qwen3-vl-8b-embed}"
 
 export PYTHONUNBUFFERED=1
 
-QWEN_MODELS=()
+QWEN_EMBED_MODELS=()
 PE_MODELS=()
+SIGLIP2_MODELS=()
+MODELS="${MODELS:-siglip2}"
+if [[ -z "$MODELS" ]]; then
+  echo "Error: MODELS is empty. Provide MODELS." >&2
+  exit 1
+fi
 read -r -a MODEL_ARGS <<< "$MODELS"
 for model in "${MODEL_ARGS[@]}"; do
   model_lower="${model,,}"
@@ -60,20 +65,29 @@ for model in "${MODEL_ARGS[@]}"; do
     pe|pe-core|pe-core-l14|pe-core-l14-336|core|l14|pe:*|perception:*|facebook/pe-*)
       PE_MODELS+=("$model")
       ;;
-    qwen|qwen-embed|qwen3-vl-8b|qwen3-vl-8b-embed|qwen/*|qwen3-*)
-      QWEN_MODELS+=("$model")
+    qwen-embed|qwen_embed|qwen3-embed|qwen3-vl-8b-embed|qwen-embed:*|qwen_embed:*|qwen3-embed:*|qwen3-vl-embed:*)
+      QWEN_EMBED_MODELS+=("$model")
+      ;;
+    siglip2|siglip2-*|siglip2:*|google/siglip2-*)
+      SIGLIP2_MODELS+=("$model")
       ;;
     *)
-      QWEN_MODELS+=("$model")
+      SIGLIP2_MODELS+=("$model")
       ;;
   esac
 done
 
 cd "$PROJECT_ROOT"
 
-if (( ${#QWEN_MODELS[@]} )); then
+if (( ${#QWEN_EMBED_MODELS[@]} )); then
   uv sync --extra analysis-qwen
-  export MODELS="${QWEN_MODELS[*]}"
+  export MODELS="${QWEN_EMBED_MODELS[*]}"
+  uv run --extra analysis-qwen -- bash "$RUN_SCRIPT"
+fi
+
+if (( ${#SIGLIP2_MODELS[@]} )); then
+  uv sync --extra analysis-qwen
+  export MODELS="${SIGLIP2_MODELS[*]}"
   uv run --extra analysis-qwen -- bash "$RUN_SCRIPT"
 fi
 

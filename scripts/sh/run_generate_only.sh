@@ -18,7 +18,8 @@ ANIMAL="$(basename "$PROMPT_JSON" .json)"
 python -m analyse_vit.rare_colour_bias.generation.image_generation \
   --pipeline flux \
   --output-dir "$RAW_ROOT/anchors/$ANIMAL/flux" \
-  --prompt-elements-json "$PROMPT_JSON" \
+  --prompt "photorealistic studio photo, single adult eagle, full body, centered, uncropped, solid gray seamless background, wide shot, subject occupies 15% of the frame, detailed feathers" \
+  --negative-prompt "close-up, macro, zoomed in, cropped, out of frame, multiple animals, perch, branch, scenery, text, watermark, logo, toy, cartoon, illustration" \
   --seed-bg 123 \
   --seed 456 \
   --num-runs 1

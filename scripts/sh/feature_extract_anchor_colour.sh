@@ -36,7 +36,11 @@ if [[ -n "${OUTPUT_SUBDIR:-}" ]]; then
   exit 1
 fi
 
-export MODELS="${MODELS:-qwen3-vl-8b qwen3-vl-8b-embed}"
+export MODELS="${MODELS:-siglip2}"
+if [[ -z "${MODELS:-}" ]]; then
+  echo "Error: MODELS is empty. Provide MODELS." >&2
+  exit 1
+fi
 export PYTHONNOUSERSITE=1
 unset PYTHONPATH
 

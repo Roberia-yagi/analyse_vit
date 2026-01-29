@@ -11,7 +11,7 @@ import torch
 
 LOGGER = logging.getLogger("analyse_vit.feature_anchor_colour_distance_plot")
 
-DEFAULT_VISION_ORDER = ("pe-core-l14-336", "qwen3-vl-8b", "qwen3-vl-8b-embed")
+DEFAULT_VISION_ORDER = ("pe-core-l14-336", "siglip2-giant-opt-patch16-384", "qwen3-vl-8b-embed")
 DEFAULT_GEN_ORDER = ("flux", "qwen", "sd3.5")
 
 

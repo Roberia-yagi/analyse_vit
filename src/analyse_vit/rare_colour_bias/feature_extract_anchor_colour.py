@@ -160,8 +160,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=list(MODEL_SPECS.keys()),
         help=(
-            "Models to run (aliases: pe, qwen, qwen-embed). You may also pass custom model ids like "
-            "'pe:PE-Core-L14-336' or 'qwen:Qwen/Qwen3-VL-8B-Instruct'."
+            "Models to run (aliases: pe, siglip2, qwen-embed). You may also pass custom model ids like "
+            "'pe:PE-Core-L14-336' or 'siglip2:google/siglip2-giant-opt-patch16-384'."
         ),
     )
     parser.add_argument(
