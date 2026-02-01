@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=feature_extract_size
+#SBATCH --job-name=verify_selected_features
 #SBATCH --chdir=/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=128G
-#SBATCH --time=02:00:00
+#SBATCH --mem=64G
+#SBATCH --time=01:00:00
 
 set -euo pipefail
 
@@ -66,11 +66,14 @@ trap notify_exit EXIT
 PROJECT_ROOT="${PWD}"
 
 DEFAULT_RESULTS_DIR="/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit/results/selected"
-RESULTS_DIR="$DEFAULT_RESULTS_DIR"
-INPUT_SUBDIR=""
-MODELS="pe siglip2 qwen-embed"
-POOLINGS="attention_pooling mean_patch cls"
-FEATURE_EXTRACT_ARGS=""
+RESULTS_DIR="${RESULTS_DIR:-$DEFAULT_RESULTS_DIR}"
+MODELS="${MODELS:-pe qwen-embed siglip2}"
+ANIMAL="${ANIMAL:-}"
+RUN_ID="${RUN_ID:-}"
+DEVICE="${DEVICE:-}"
+BATCH_SIZE="${BATCH_SIZE:-}"
+RTOL="${RTOL:-}"
+ATOL="${ATOL:-}"
 
 CACHE_ROOT="$PROJECT_ROOT/.cache"
 HF_CACHE_ROOT="$PROJECT_ROOT/.hf_cache"
@@ -78,56 +81,29 @@ export XDG_CACHE_HOME="$CACHE_ROOT"
 export UV_CACHE_DIR="$CACHE_ROOT/uv"
 source "$PROJECT_ROOT/scripts/utils/race_guard.sh"
 if [[ -z "$RESULTS_DIR" || "$RESULTS_DIR" != /* ]]; then
-  echo "Error: RESULTS_DIR must be an absolute path: $RESULTS_DIR (absolute path required)" >&2
+  echo "Error: RESULTS_DIR must be an absolute path (absolute path required): $RESULTS_DIR" >&2
   exit 1
 fi
 if [[ ! -d "$RESULTS_DIR" ]]; then
   echo "Error: RESULTS_DIR not found (absolute path required): $RESULTS_DIR" >&2
   exit 1
 fi
-
-if [[ -n "$INPUT_SUBDIR" ]]; then
-  if [[ "$INPUT_SUBDIR" == /* ]]; then
-    echo "Error: INPUT_SUBDIR must be relative to RESULTS_DIR: $INPUT_SUBDIR" >&2
-    exit 1
-  fi
-  INPUT_DIR="$RESULTS_DIR/$INPUT_SUBDIR"
-else
-  if [[ "$RESULTS_DIR" == */selected ]]; then
-    INPUT_DIR="$RESULTS_DIR/size"
-  else
-    INPUT_DIR="$RESULTS_DIR/selected/size"
-  fi
-fi
-if [[ ! -d "$INPUT_DIR" ]]; then
-  echo "Error: INPUT_DIR not found: $INPUT_DIR" >&2
-  exit 1
-fi
-if [[ "$(basename "$INPUT_DIR")" != "size" || "$(basename "$(dirname "$INPUT_DIR")")" != "selected" ]]; then
-  echo "Error: INPUT_DIR must point to the selected/size directory: $INPUT_DIR" >&2
-  exit 1
-fi
-
-if [[ -n "${OUTPUT_SUBDIR:-}" ]]; then
-  echo "Error: OUTPUT_SUBDIR is not supported. Features must be saved under selected/size/*/features." >&2
-  exit 1
-fi
-
-export RESULTS_DIR INPUT_SUBDIR
-export INPUT_DIR
+export RESULTS_DIR
 
 export PYTHONUNBUFFERED=1
 export PYTHONNOUSERSITE=1
 unset PYTHONPATH
 
-QWEN_EMBED_MODELS=()
-PE_MODELS=()
-SIGLIP2_MODELS=()
+cd "$PROJECT_ROOT"
 if [[ -z "$MODELS" ]]; then
   echo "Error: MODELS is empty. Provide MODELS." >&2
   exit 1
 fi
 read -r -a MODEL_ARGS <<< "$MODELS"
+
+PE_MODELS=()
+QWEN_MODELS=()
+SIGLIP2_MODELS=()
 for model in "${MODEL_ARGS[@]}"; do
   model_lower="${model,,}"
   case "$model_lower" in
@@ -135,7 +111,7 @@ for model in "${MODEL_ARGS[@]}"; do
       PE_MODELS+=("$model")
       ;;
     qwen-embed|qwen_embed|qwen3-embed|qwen3-vl-8b-embed|qwen-embed:*|qwen_embed:*|qwen3-embed:*|qwen3-vl-embed:*)
-      QWEN_EMBED_MODELS+=("$model")
+      QWEN_MODELS+=("$model")
       ;;
     siglip2|siglip2-*|siglip2:*|google/siglip2-*)
       SIGLIP2_MODELS+=("$model")
@@ -146,54 +122,60 @@ for model in "${MODEL_ARGS[@]}"; do
   esac
 done
 
-cd "$PROJECT_ROOT"
-
 build_args() {
   local models_str="$1"
-  read -r -a MODEL_ARGS <<< "$models_str"
-  ARGS=(
-    --input-root "$INPUT_DIR"
-    --models "${MODEL_ARGS[@]}"
-  )
+  local -a args
+  args=(--results-dir "$RESULTS_DIR")
+  if [[ -n "${ANIMAL:-}" ]]; then
+    args+=(--animal "$ANIMAL")
+  fi
+  if [[ -n "${RUN_ID:-}" ]]; then
+    args+=(--run-id "$RUN_ID")
+  fi
   if [[ -n "${DEVICE:-}" ]]; then
-    ARGS+=(--device "$DEVICE")
+    args+=(--device "$DEVICE")
   fi
   if [[ -n "${BATCH_SIZE:-}" ]]; then
-    ARGS+=(--batch-size "$BATCH_SIZE")
+    args+=(--batch-size "$BATCH_SIZE")
   fi
-  if [[ -n "${HF_TOKEN:-}" ]]; then
-    ARGS+=(--hf-token "$HF_TOKEN")
+if [[ -n "${RTOL:-}" ]]; then
+  args+=(--rtol "$RTOL")
+fi
+if [[ -n "${ATOL:-}" ]]; then
+  args+=(--atol "$ATOL")
+fi
+args+=(--diagnose)
+  if [[ -n "$models_str" ]]; then
+    read -r -a MODEL_ARGS <<< "$models_str"
+    args+=(--models "${MODEL_ARGS[@]}")
   fi
-  if [[ -n "${POOLINGS:-}" ]]; then
-    read -r -a POOLING_ARGS <<< "$POOLINGS"
-    ARGS+=(--poolings "${POOLING_ARGS[@]}")
+  ARGS=("${args[@]}")
+}
+
+run_qwen_family() {
+  local models=()
+  if (( ${#QWEN_MODELS[@]} )); then
+    models+=("${QWEN_MODELS[@]}")
   fi
-  if [[ -n "${OVERWRITE:-}" ]]; then
-    ARGS+=(--overwrite)
+  if (( ${#SIGLIP2_MODELS[@]} )); then
+    models+=("${SIGLIP2_MODELS[@]}")
   fi
-  if [[ -n "${FEATURE_EXTRACT_ARGS:-}" ]]; then
-    read -r -a EXTRA_ARGS <<< "$FEATURE_EXTRACT_ARGS"
-    ARGS+=("${EXTRA_ARGS[@]}")
+  if (( ${#models[@]} )); then
+    uv sync --extra analysis-qwen
+    build_args "${models[*]}"
+    uv run --extra analysis-qwen -- \
+      python -m analyse_vit.rare_colour_bias.feature_extraction.verify_selected_features "${ARGS[@]}"
   fi
 }
 
-if (( ${#QWEN_EMBED_MODELS[@]} )); then
-  uv sync --extra analysis-qwen
-  MODELS_STR="${QWEN_EMBED_MODELS[*]}"
-  build_args "$MODELS_STR"
-  uv run --extra analysis-qwen -- python -m analyse_vit.rare_colour_bias.feature_extraction.feature_extract_size "${ARGS[@]}"
-fi
+run_pe_family() {
+  if (( ${#PE_MODELS[@]} )); then
+    uv sync --extra analysis-perception
+    build_args "${PE_MODELS[*]}"
+    uv run --extra analysis-perception -- \
+      python -m analyse_vit.rare_colour_bias.feature_extraction.verify_selected_features "${ARGS[@]}"
+  fi
+}
 
-if (( ${#SIGLIP2_MODELS[@]} )); then
-  uv sync --extra analysis-qwen
-  MODELS_STR="${SIGLIP2_MODELS[*]}"
-  build_args "$MODELS_STR"
-  uv run --extra analysis-qwen -- python -m analyse_vit.rare_colour_bias.feature_extraction.feature_extract_size "${ARGS[@]}"
-fi
-
-if (( ${#PE_MODELS[@]} )); then
-  uv sync --extra analysis-perception
-  MODELS_STR="${PE_MODELS[*]}"
-  build_args "$MODELS_STR"
-  uv run --extra analysis-perception -- python -m analyse_vit.rare_colour_bias.feature_extraction.feature_extract_size "${ARGS[@]}"
-fi
+run_qwen_family
+run_pe_family

@@ -9,7 +9,7 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 from PIL import Image, ImageFilter
 
-from ..generation.gen_utils import _find_repo_root, _resolve_path
+from analyse_vit.rare_colour_bias.generation.gen_utils import _find_repo_root, _resolve_path
 
 
 PlacementMode = str
@@ -310,7 +310,11 @@ def _compose_sizes(
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Composite anchors onto backgrounds with size sweep.")
-    parser.add_argument("--selected-root", default=None, help="Root directory that contains anchors/masks/background.")
+    parser.add_argument(
+        "--selected-root",
+        default=None,
+        help="Root directory that contains anchors/without_composite, masks, and background.",
+    )
     parser.add_argument("--anchors-root", default=None)
     parser.add_argument("--masks-root", default=None)
     parser.add_argument("--background-root", default=None)
@@ -345,7 +349,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     else:
         selected_root = _resolve_path(args.selected_root)
 
-    anchors_root = _resolve_path(args.anchors_root) if args.anchors_root else selected_root / "anchors"
+    anchors_root = (
+        _resolve_path(args.anchors_root)
+        if args.anchors_root
+        else selected_root / "anchors" / "without_composite"
+    )
     masks_root = _resolve_path(args.masks_root) if args.masks_root else selected_root / "masks"
     background_root = _resolve_path(args.background_root) if args.background_root else selected_root / "background"
     output_root = _resolve_path(args.output_root) if args.output_root else selected_root / "size"
@@ -399,7 +407,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         if not background_path.exists():
             raise ValueError(f"Background not found: {background_path}")
 
-        output_dir = output_root / animal / "size" / model / "images"
+        output_dir = output_root / animal / model / "images"
 
         _compose_sizes(
             anchor_path=anchor_path,

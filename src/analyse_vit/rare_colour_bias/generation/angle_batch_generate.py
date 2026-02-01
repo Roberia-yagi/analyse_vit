@@ -6,17 +6,17 @@ import logging
 from pathlib import Path
 from typing import Iterable, Optional
 
-from ..composite.gen_stages import _run_generation
-from .gen_pipeline import (
+from analyse_vit.rare_colour_bias.composite.gen_stages import _run_generation
+from analyse_vit.rare_colour_bias.generation.gen_pipeline import (
     _default_model_id_for,
     _load_text2image_pipeline,
     _release_torch_cuda,
     _resolve_generation_defaults,
     _resolve_generation_resolution,
 )
-from .gen_prompts import _generate_prompt_set, _load_prompt_elements
-from .gen_types import ColorParams, CompositeParams, FluxParams, RunConfig, SamParams, _PIPELINES
-from .gen_utils import (
+from analyse_vit.rare_colour_bias.generation.gen_prompts import _generate_prompt_set, _load_prompt_elements
+from analyse_vit.rare_colour_bias.generation.gen_types import ColorParams, CompositeParams, FluxParams, RunConfig, SamParams, _PIPELINES
+from analyse_vit.rare_colour_bias.generation.gen_utils import (
     _derive_run_seed,
     _find_repo_root,
     _get_hf_token,

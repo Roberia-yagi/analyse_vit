@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+
 : "${RACE_DIR:?RACE_DIR が未設定です（sbatch 側で --export してください）}"
 
 WINNER_FILE="${RACE_DIR}/winner_jobid"

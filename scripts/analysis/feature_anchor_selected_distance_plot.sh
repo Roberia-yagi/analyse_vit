@@ -56,11 +56,11 @@ notify_exit() {
 }
 trap notify_exit EXIT
 # ------------------------------
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PROJECT_ROOT="${PWD}"
 DEFAULT_RESULTS_DIR="/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit/results/selected"
 RESULTS_DIR="${RESULTS_DIR:-$DEFAULT_RESULTS_DIR}"
-if [[ -z "$RESULTS_DIR" || "$RESULTS_DIR" != /* ]]; then
-  echo "Error: RESULTS_DIR must be an absolute path: $RESULTS_DIR" >&2
+if [[ "$RESULTS_DIR" != /* ]]; then
+  echo "Error: RESULTS_DIR must be an absolute path: $RESULTS_DIR (absolute path required)" >&2
   exit 1
 fi
 if [[ ! -d "$RESULTS_DIR" ]]; then
@@ -74,13 +74,61 @@ else
   SELECTED_ROOT="$RESULTS_DIR/selected"
 fi
 if [[ ! -d "$SELECTED_ROOT" ]]; then
-  echo "Error: selected directory not found (absolute path required): $SELECTED_ROOT" >&2
+  echo "Error: selected root not found: $SELECTED_ROOT" >&2
+  exit 1
+fi
+COMPOSITE_SUBDIR="with_composite"
+if [[ ! -d "$SELECTED_ROOT/anchors/$COMPOSITE_SUBDIR" ]]; then
+  echo "Error: anchors root not found: $SELECTED_ROOT/anchors/$COMPOSITE_SUBDIR" >&2
+  exit 1
+fi
+if [[ ! -d "$SELECTED_ROOT/angles/$COMPOSITE_SUBDIR" ]]; then
+  echo "Error: angles root not found: $SELECTED_ROOT/angles/$COMPOSITE_SUBDIR" >&2
+  exit 1
+fi
+if [[ ! -d "$SELECTED_ROOT/colour/$COMPOSITE_SUBDIR" && ! -d "$SELECTED_ROOT/colours/$COMPOSITE_SUBDIR" ]]; then
+  echo "Error: colour root not found: $SELECTED_ROOT/colour(s)/$COMPOSITE_SUBDIR" >&2
   exit 1
 fi
 
-SIZES="${SIZES:-100,90,80,70,60,50,40,30,20,10}"
+OUTPUT_DIR="${OUTPUT_DIR:-}"
+GEN_MODEL="${GEN_MODEL:-qwen}"
 
-uv run --extra analysis-perception -- python -m analyse_vit.rare_colour_bias.composite.size_composite \
-  --selected-root "$SELECTED_ROOT" \
-  --sizes "$SIZES" \
-  "$@"
+export PYTHONNOUSERSITE=1
+unset PYTHONPATH
+
+ARGS=(
+  --selected-root "$SELECTED_ROOT"
+  --composite-subdir "$COMPOSITE_SUBDIR"
+)
+if [[ -n "${OUTPUT_DIR:-}" ]]; then
+  ARGS+=(--output-root "$OUTPUT_DIR")
+fi
+if [[ -n "${DPI:-}" ]]; then
+  ARGS+=(--dpi "$DPI")
+fi
+if [[ -n "${SIZE_VALUES:-}" ]]; then
+  read -r -a EXTRA_ARGS <<< "$SIZE_VALUES"
+  ARGS+=(--size-values "${EXTRA_ARGS[@]}")
+fi
+if [[ -n "${ANGLES:-}" ]]; then
+  read -r -a EXTRA_ARGS <<< "$ANGLES"
+  ARGS+=(--angles "${EXTRA_ARGS[@]}")
+fi
+if [[ -n "${COLOUR_RANKS:-}" ]]; then
+  read -r -a EXTRA_ARGS <<< "$COLOUR_RANKS"
+  ARGS+=(--colour-ranks "${EXTRA_ARGS[@]}")
+fi
+if [[ -n "${GEN_MODEL:-}" ]]; then
+  ARGS+=(--gen-model "$GEN_MODEL")
+fi
+if [[ -n "${VISION_MODEL:-}" ]]; then
+  ARGS+=(--vision-model "$VISION_MODEL")
+fi
+if [[ -n "${POOLING:-}" ]]; then
+  ARGS+=(--pooling "$POOLING")
+fi
+
+cd "$PROJECT_ROOT"
+uv sync --extra analysis-perception
+uv run --extra analysis-perception -- python -m analyse_vit.rare_colour_bias.plot.feature_anchor_selected_distance_plot "${ARGS[@]}"

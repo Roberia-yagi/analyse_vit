@@ -4,7 +4,7 @@ import json
 import random
 from typing import Dict, Iterable, Tuple
 
-from .gen_utils import _derive_run_seed
+from analyse_vit.rare_colour_bias.generation.gen_utils import _derive_run_seed
 
 
 def _load_prompt_elements(path) -> Tuple[Tuple[str, ...], Tuple[Tuple[str, ...], ...]]:

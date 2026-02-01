@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+
 usage() {
   cat <<'USAGE'
 Usage: sbatch_race_watch [options] [--] [sbatch args...] job.slurm

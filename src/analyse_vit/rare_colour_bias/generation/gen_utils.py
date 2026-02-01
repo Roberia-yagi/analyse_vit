@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, Optional
 
 from PIL import Image
 
-from .gen_types import RunDirs
+from analyse_vit.rare_colour_bias.generation.gen_types import RunDirs
 
 
 _LOGGER_CACHE: Dict[str, logging.Logger] = {}

@@ -7,8 +7,8 @@ from typing import Any, Optional, Tuple
 import numpy as np
 from PIL import Image
 
-from .gen_mask import _select_mask, _select_mask_by_score
-from ..generation.gen_utils import _get_hf_token
+from analyse_vit.rare_colour_bias.composite.gen_mask import _select_mask, _select_mask_by_score
+from analyse_vit.rare_colour_bias.generation.gen_utils import _get_hf_token
 
 
 def _maybe_login_hf(token: Optional[str]) -> None:

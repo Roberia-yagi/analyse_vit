@@ -74,13 +74,37 @@ else
   SELECTED_ROOT="$RESULTS_DIR/selected"
 fi
 if [[ ! -d "$SELECTED_ROOT" ]]; then
-  echo "Error: selected directory not found (absolute path required): $SELECTED_ROOT" >&2
+  echo "Error: selected root not found: $SELECTED_ROOT" >&2
+  exit 1
+fi
+COMPOSITE_SUBDIR="without_composite"
+if [[ ! -d "$SELECTED_ROOT/anchors/$COMPOSITE_SUBDIR" ]]; then
+  echo "Error: anchors root not found: $SELECTED_ROOT/anchors/$COMPOSITE_SUBDIR" >&2
+  exit 1
+fi
+if [[ ! -d "$SELECTED_ROOT/colour/$COMPOSITE_SUBDIR" && ! -d "$SELECTED_ROOT/colours/$COMPOSITE_SUBDIR" ]]; then
+  echo "Error: colour root not found: $SELECTED_ROOT/colour/$COMPOSITE_SUBDIR" >&2
   exit 1
 fi
 
-SIZES="${SIZES:-100,90,80,70,60,50,40,30,20,10}"
+OUTPUT_DIR="${OUTPUT_DIR:-}"
 
-uv run --extra analysis-perception -- python -m analyse_vit.rare_colour_bias.composite.size_composite \
-  --selected-root "$SELECTED_ROOT" \
-  --sizes "$SIZES" \
-  "$@"
+export PYTHONNOUSERSITE=1
+unset PYTHONPATH
+
+ARGS=(
+  --selected-root "$SELECTED_ROOT"
+)
+if [[ -n "${OUTPUT_DIR:-}" ]]; then
+  ARGS+=(--output-root "$OUTPUT_DIR")
+fi
+if [[ -n "${DPI:-}" ]]; then
+  ARGS+=(--dpi "$DPI")
+fi
+if [[ -n "${PLOT_ARGS:-}" ]]; then
+  read -r -a EXTRA_ARGS <<< "$PLOT_ARGS"
+  ARGS+=("${EXTRA_ARGS[@]}")
+fi
+
+cd "$PROJECT_ROOT"
+uv run --extra analysis-perception -- python -m analyse_vit.rare_colour_bias.plot.feature_anchor_colour_distance_plot "${ARGS[@]}"

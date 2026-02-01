@@ -8,8 +8,8 @@ from typing import Any, Dict, Iterable, Optional, Tuple, Sequence
 
 from PIL import Image
 
-from .gen_types import _PIPELINES
-from .gen_utils import _filter_kwargs_for_callable
+from analyse_vit.rare_colour_bias.generation.gen_types import _PIPELINES
+from analyse_vit.rare_colour_bias.generation.gen_utils import _filter_kwargs_for_callable
 
 
 def _get_pipeline_spec(pipeline: str) -> Dict[str, Any]:

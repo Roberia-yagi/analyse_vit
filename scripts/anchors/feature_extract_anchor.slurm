@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=feature_extract_angles
+#SBATCH --job-name=feature_extract_anchor
 #SBATCH --chdir=/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
@@ -68,9 +68,9 @@ PROJECT_ROOT="${PWD}"
 DEFAULT_RESULTS_DIR="/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit/results/selected"
 RESULTS_DIR="${RESULTS_DIR:-$DEFAULT_RESULTS_DIR}"
 INPUT_SUBDIR="${INPUT_SUBDIR:-}"
-INPUT_SUBDIRS="${INPUT_SUBDIRS:-}"
-MODELS="${MODELS:-pe qwen-embed siglip2}"
-POOLINGS="${POOLINGS:-}"
+COMPOSITES="${COMPOSITES:-without_composite}"
+MODELS="${MODELS:-siglip2}"
+FEATURE_EXTRACT_ARGS=""
 
 CACHE_ROOT="$PROJECT_ROOT/.cache"
 HF_CACHE_ROOT="$PROJECT_ROOT/.hf_cache"
@@ -86,29 +86,35 @@ if [[ ! -d "$RESULTS_DIR" ]]; then
   exit 1
 fi
 
-if [[ -n "${INPUT_SUBDIR:-}" && -n "${INPUT_SUBDIRS:-}" ]]; then
-  echo "Error: Set only one of INPUT_SUBDIR or INPUT_SUBDIRS (relative to RESULTS_DIR)." >&2
-  exit 1
-fi
-
-INPUT_SUBDIR_LIST=()
-if [[ -n "${INPUT_SUBDIRS:-}" ]]; then
-  read -r -a INPUT_SUBDIR_LIST <<< "$INPUT_SUBDIRS"
-elif [[ -n "${INPUT_SUBDIR:-}" ]]; then
-  INPUT_SUBDIR_LIST=("$INPUT_SUBDIR")
+if [[ -n "$INPUT_SUBDIR" ]]; then
+  if [[ "$INPUT_SUBDIR" == /* ]]; then
+    echo "Error: INPUT_SUBDIR must be relative to RESULTS_DIR: $INPUT_SUBDIR" >&2
+    exit 1
+  fi
+  INPUT_DIR="$RESULTS_DIR/$INPUT_SUBDIR"
 else
   if [[ "$RESULTS_DIR" == */selected ]]; then
-    INPUT_SUBDIR_LIST=("angles/without_composite" "angles/with_composite")
+    INPUT_DIR="$RESULTS_DIR"
   else
-    INPUT_SUBDIR_LIST=("selected/angles/without_composite" "selected/angles/with_composite")
+    INPUT_DIR="$RESULTS_DIR/selected"
   fi
+fi
+if [[ ! -d "$INPUT_DIR" ]]; then
+  echo "Error: INPUT_DIR not found: $INPUT_DIR" >&2
+  exit 1
+fi
+if [[ "$(basename "$INPUT_DIR")" != "selected" ]]; then
+  echo "Error: INPUT_DIR must point to the selected directory: $INPUT_DIR" >&2
+  exit 1
 fi
 
 if [[ -n "${OUTPUT_SUBDIR:-}" ]]; then
-  echo "Error: OUTPUT_SUBDIR is not supported. Features must be saved under selected/angles/{without_composite,with_composite}/*/features." >&2
+  echo "Error: OUTPUT_SUBDIR is not supported. Features must be saved under selected/anchors/{without_composite,with_composite} or selected/colour(s)/{without_composite,with_composite}." >&2
   exit 1
 fi
-export RESULTS_DIR
+
+export RESULTS_DIR INPUT_SUBDIR
+export INPUT_DIR
 
 export PYTHONUNBUFFERED=1
 export PYTHONNOUSERSITE=1
@@ -117,7 +123,6 @@ unset PYTHONPATH
 QWEN_EMBED_MODELS=()
 PE_MODELS=()
 SIGLIP2_MODELS=()
-USER_POOLINGS="${POOLINGS:-}"
 if [[ -z "$MODELS" ]]; then
   echo "Error: MODELS is empty. Provide MODELS." >&2
   exit 1
@@ -145,12 +150,16 @@ cd "$PROJECT_ROOT"
 
 build_args() {
   local models_str="$1"
-  local poolings_str="$2"
   read -r -a MODEL_ARGS <<< "$models_str"
   ARGS=(
     --input-root "$INPUT_DIR"
     --models "${MODEL_ARGS[@]}"
   )
+  if [[ -n "${COMPOSITES:-}" ]]; then
+    read -r -a COMPOSITE_ARGS <<< "$COMPOSITES"
+    ARGS+=(--composites "${COMPOSITE_ARGS[@]}")
+  fi
+  ARGS+=(--targets "anchors")
   if [[ -n "${DEVICE:-}" ]]; then
     ARGS+=(--device "$DEVICE")
   fi
@@ -160,8 +169,8 @@ build_args() {
   if [[ -n "${HF_TOKEN:-}" ]]; then
     ARGS+=(--hf-token "$HF_TOKEN")
   fi
-  if [[ -n "$poolings_str" ]]; then
-    read -r -a POOLING_ARGS <<< "$poolings_str"
+  if [[ -n "${POOLINGS:-}" ]]; then
+    read -r -a POOLING_ARGS <<< "$POOLINGS"
     ARGS+=(--poolings "${POOLING_ARGS[@]}")
   fi
   if [[ -n "${OVERWRITE:-}" ]]; then
@@ -173,70 +182,23 @@ build_args() {
   fi
 }
 
-run_models() {
-  if (( ${#QWEN_EMBED_MODELS[@]} )); then
-    uv sync --extra analysis-qwen
-    MODELS_STR="${QWEN_EMBED_MODELS[*]}"
-    POOLINGS_STR="$USER_POOLINGS"
-    if [[ -z "$POOLINGS_STR" ]]; then
-      POOLINGS_STR="attention_pooling"
-    fi
-    build_args "$MODELS_STR" "$POOLINGS_STR"
-    uv run --extra analysis-qwen -- python -m analyse_vit.rare_colour_bias.feature_extraction.feature_extract_angles "${ARGS[@]}"
-  fi
+if (( ${#QWEN_EMBED_MODELS[@]} )); then
+  uv sync --extra analysis-qwen
+  MODELS_STR="${QWEN_EMBED_MODELS[*]}"
+  build_args "$MODELS_STR"
+  uv run --extra analysis-qwen -- python -m analyse_vit.rare_colour_bias.feature_extraction.feature_extract_anchor_colour "${ARGS[@]}"
+fi
 
-  if (( ${#SIGLIP2_MODELS[@]} )); then
-    uv sync --extra analysis-qwen
-    MODELS_STR="${SIGLIP2_MODELS[*]}"
-    POOLINGS_STR="$USER_POOLINGS"
-    if [[ -z "$POOLINGS_STR" ]]; then
-      POOLINGS_STR="cls mean_patch attention_pooling"
-    fi
-    build_args "$MODELS_STR" "$POOLINGS_STR"
-    uv run --extra analysis-qwen -- python -m analyse_vit.rare_colour_bias.feature_extraction.feature_extract_angles "${ARGS[@]}"
-  fi
+if (( ${#SIGLIP2_MODELS[@]} )); then
+  uv sync --extra analysis-qwen
+  MODELS_STR="${SIGLIP2_MODELS[*]}"
+  build_args "$MODELS_STR"
+  uv run --extra analysis-qwen -- python -m analyse_vit.rare_colour_bias.feature_extraction.feature_extract_anchor_colour "${ARGS[@]}"
+fi
 
-  if (( ${#PE_MODELS[@]} )); then
-    uv sync --extra analysis-perception
-    MODELS_STR="${PE_MODELS[*]}"
-    POOLINGS_STR="$USER_POOLINGS"
-    if [[ -z "$POOLINGS_STR" ]]; then
-      POOLINGS_STR="cls mean_patch attention_pooling"
-    fi
-    build_args "$MODELS_STR" "$POOLINGS_STR"
-    uv run --extra analysis-perception -- python -m analyse_vit.rare_colour_bias.feature_extraction.feature_extract_angles "${ARGS[@]}"
-  fi
-}
-
-for input_subdir in "${INPUT_SUBDIR_LIST[@]}"; do
-  if [[ -z "$input_subdir" ]]; then
-    echo "Error: INPUT_SUBDIRS contains an empty entry. Entries must be relative to RESULTS_DIR." >&2
-    exit 1
-  fi
-  if [[ "$input_subdir" == /* ]]; then
-    echo "Error: INPUT_SUBDIRS must be relative to RESULTS_DIR: $input_subdir" >&2
-    exit 1
-  fi
-  INPUT_DIR="$RESULTS_DIR/$input_subdir"
-  if [[ ! -d "$INPUT_DIR" ]]; then
-    echo "Error: INPUT_DIR not found: $INPUT_DIR" >&2
-    exit 1
-  fi
-  input_leaf="$(basename "$INPUT_DIR")"
-  input_parent="$(basename "$(dirname "$INPUT_DIR")")"
-  input_grandparent="$(basename "$(dirname "$(dirname "$INPUT_DIR")")")"
-  if [[ "$input_parent" != "angles" || "$input_grandparent" != "selected" ]]; then
-    echo "Error: INPUT_DIR must be under selected/angles/{without_composite,with_composite}: $INPUT_DIR" >&2
-    exit 1
-  fi
-  if [[ "$input_leaf" != "without_composite" && "$input_leaf" != "with_composite" ]]; then
-    echo "Error: INPUT_DIR must point to the selected/angles/{without_composite,with_composite} directory: $INPUT_DIR" >&2
-    exit 1
-  fi
-
-  INPUT_SUBDIR="$input_subdir"
-  export INPUT_SUBDIR
-  export INPUT_DIR
-
-  run_models
-done
+if (( ${#PE_MODELS[@]} )); then
+  uv sync --extra analysis-perception
+  MODELS_STR="${PE_MODELS[*]}"
+  build_args "$MODELS_STR"
+  uv run --extra analysis-perception -- python -m analyse_vit.rare_colour_bias.feature_extraction.feature_extract_anchor_colour "${ARGS[@]}"
+fi

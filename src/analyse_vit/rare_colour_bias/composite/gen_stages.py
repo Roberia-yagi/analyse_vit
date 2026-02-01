@@ -14,13 +14,13 @@ import re
 import numpy as np
 from PIL import Image
 
-from .gen_color import _apply_color_transform, _np_to_pil, _pil_to_np_rgb, _resolve_color_transform
-from .gen_composite import _composite_variants, _compute_transform
-from .gen_mask import _compute_alpha, _compute_bbox, _mask_area_frac, _postprocess_mask, _save_mask
-from ..generation.gen_pipeline import _generate_images, _load_text2image_pipeline
-from .gen_sam import _load_lang_sam_model, _predict_mask_lang_sam
-from ..generation.gen_types import RunConfig, RunDirs, TransformInfo
-from ..generation.gen_utils import (
+from analyse_vit.rare_colour_bias.composite.gen_color import _apply_color_transform, _np_to_pil, _pil_to_np_rgb, _resolve_color_transform
+from analyse_vit.rare_colour_bias.composite.gen_composite import _composite_variants, _compute_transform
+from analyse_vit.rare_colour_bias.composite.gen_mask import _compute_alpha, _compute_bbox, _mask_area_frac, _postprocess_mask, _save_mask
+from analyse_vit.rare_colour_bias.generation.gen_pipeline import _generate_images, _load_text2image_pipeline
+from analyse_vit.rare_colour_bias.composite.gen_sam import _load_lang_sam_model, _predict_mask_lang_sam
+from analyse_vit.rare_colour_bias.generation.gen_types import RunConfig, RunDirs, TransformInfo
+from analyse_vit.rare_colour_bias.generation.gen_utils import (
     _derive_run_seed,
     _json_safe,
     _get_cv2_version,

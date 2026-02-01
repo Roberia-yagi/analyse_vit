@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -11,11 +12,11 @@ import re
 import numpy as np
 from PIL import Image
 
-from ..composite.gen_color import _apply_color_transform, _np_to_pil, _pil_to_np_rgb, _resolve_color_transform
-from ..composite.gen_mask import _mask_area_frac, _postprocess_mask, _save_mask
-from ..composite.gen_sam import _load_lang_sam_model, _predict_mask_lang_sam
-from ..generation.gen_types import ColorTransform
-from ..generation.gen_utils import (
+from analyse_vit.rare_colour_bias.composite.gen_color import _apply_color_transform, _np_to_pil, _pil_to_np_rgb, _resolve_color_transform
+from analyse_vit.rare_colour_bias.composite.gen_mask import _mask_area_frac, _postprocess_mask, _save_mask
+from analyse_vit.rare_colour_bias.composite.gen_sam import _load_lang_sam_model, _predict_mask_lang_sam
+from analyse_vit.rare_colour_bias.generation.gen_types import ColorTransform
+from analyse_vit.rare_colour_bias.generation.gen_utils import (
     _get_cv2_version,
     _get_version,
     _load_required_rgb_image,
@@ -33,6 +34,7 @@ class RecolorConfig:
     run_root: Optional[Path]
     anchors_root: Optional[Path]
     output_root: Optional[Path]
+    composite_subdir: Optional[str]
     gen_model: Optional[str]
     animals: Optional[list[str]]
     object_name: str
@@ -49,6 +51,19 @@ class RecolorConfig:
     device: str
     hf_token: Optional[str]
     save_rgba: bool
+    num_shards: int
+    shard_index: int
+
+
+def _get_stdout_logger(name: str) -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+    return logger
 
 
 def _parse_args(argv: Optional[list[str]] = None) -> RecolorConfig:
@@ -57,12 +72,17 @@ def _parse_args(argv: Optional[list[str]] = None) -> RecolorConfig:
     parser.add_argument(
         "--anchors-root",
         default=None,
-        help="Structured anchors root (e.g., results/selected/anchors).",
+        help="Structured anchors root (e.g., results/selected/anchors/without_composite).",
     )
     parser.add_argument(
         "--output-root",
         default=None,
         help="Structured root to write colour/masks (default: anchors-root/..).",
+    )
+    parser.add_argument(
+        "--composite-subdir",
+        default=None,
+        help="Composite subdir name to write under colour/masks (e.g., with_composite).",
     )
     parser.add_argument("--gen-model", default=None, help="Filter generation model (flux/qwen/sd3.5).")
     parser.add_argument(
@@ -100,13 +120,22 @@ def _parse_args(argv: Optional[list[str]] = None) -> RecolorConfig:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--hf-token", default=None)
     parser.add_argument("--save-rgba", action="store_true")
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     args = parser.parse_args(argv)
 
     anchors_root = _resolve_path(args.anchors_root) if args.anchors_root else None
     output_root = _resolve_path(args.output_root) if args.output_root else None
+    composite_subdir = args.composite_subdir.strip() if isinstance(args.composite_subdir, str) else None
     if anchors_root is not None:
         if not anchors_root.is_dir():
             raise FileNotFoundError(f"--anchors-root does not exist: {anchors_root}")
+        if composite_subdir is None:
+            anchor_tail = anchors_root.name
+            if anchor_tail in ("with_composite", "without_composite"):
+                composite_subdir = anchor_tail
+        if composite_subdir is None:
+            raise ValueError("--composite-subdir is required when using --anchors-root.")
         if output_root is None:
             output_root = anchors_root.parent
         run_root = None
@@ -147,11 +176,16 @@ def _parse_args(argv: Optional[list[str]] = None) -> RecolorConfig:
         raise ValueError("--mask-min-area-frac must be < --mask-max-area-frac.")
     if args.mask_dilate_px < 0:
         raise ValueError("--mask-dilate-px must be >= 0.")
+    if args.num_shards <= 0:
+        raise ValueError("--num-shards must be >= 1.")
+    if args.shard_index < 0 or args.shard_index >= args.num_shards:
+        raise ValueError("--shard-index must be within [0, num-shards).")
 
     return RecolorConfig(
         run_root=run_root,
         anchors_root=anchors_root,
         output_root=output_root,
+        composite_subdir=composite_subdir,
         gen_model=args.gen_model.strip() if isinstance(args.gen_model, str) and args.gen_model else None,
         animals=animals,
         object_name=object_name,
@@ -168,6 +202,8 @@ def _parse_args(argv: Optional[list[str]] = None) -> RecolorConfig:
         device=str(args.device),
         hf_token=args.hf_token,
         save_rgba=bool(args.save_rgba),
+        num_shards=int(args.num_shards),
+        shard_index=int(args.shard_index),
     )
 
 
@@ -189,7 +225,7 @@ def _collect_run_dirs(run_root: Path) -> list[Path]:
 
 
 def _apply_recolor_to_anchor(
-    image: Image.Image,
+    rgb: np.ndarray,
     transform: ColorTransform,
     mask: np.ndarray,
     mask_suffix: str,
@@ -200,7 +236,6 @@ def _apply_recolor_to_anchor(
     logger,
     config: RecolorConfig,
 ) -> None:
-    rgb = _pil_to_np_rgb(image)
     rgb_out = _apply_color_transform(rgb, mask, transform, config.min_saturation)
     _np_to_pil(rgb_out, "RGB").save(run_dirs.outputs / f"anchor_{output_tag}{mask_suffix}.png")
 
@@ -227,6 +262,7 @@ def _run_recolor_on_dir(run_dir: Path, config: RecolorConfig, lang_sam_model) ->
     anchor_images = {
         "primary": _load_required_rgb_image(_resolve_run_input(run_dirs, "anchor.png")),
     }
+    anchor_rgbs = {kind: _pil_to_np_rgb(img) for kind, img in anchor_images.items()}
 
     color_transforms = {
         color: _resolve_color_transform(color, config.color_hue_deg) for color in config.colors
@@ -281,7 +317,7 @@ def _run_recolor_on_dir(run_dir: Path, config: RecolorConfig, lang_sam_model) ->
             for color, transform in color_transforms.items():
                 output_tag = _sanitize_tag(color)
                 _apply_recolor_to_anchor(
-                    anchor_images[kind],
+                    anchor_rgbs[kind],
                     transform,
                     mask,
                     mask_suffix,
@@ -310,6 +346,8 @@ def _run_recolor_on_dir(run_dir: Path, config: RecolorConfig, lang_sam_model) ->
         "color_transforms": {name: asdict(transform) for name, transform in color_transforms.items()},
         "mask_area_frac": mask_stats,
         "multi_mask_mode": multi_mask_mode,
+        "num_shards": config.num_shards,
+        "shard_index": config.shard_index,
         "library_versions": {
             "numpy": _get_version("numpy"),
             "Pillow": _get_version("Pillow"),
@@ -326,7 +364,7 @@ def _run_recolor_on_dir(run_dir: Path, config: RecolorConfig, lang_sam_model) ->
 
 
 def _extract_run_tag(path: Path) -> str:
-    match = re.search(r"run[_-]?(\\d+)", path.stem, flags=re.IGNORECASE)
+    match = re.search(r"run[_-]?(\d+)", path.stem, flags=re.IGNORECASE)
     if match:
         return f"run_{match.group(1)}"
     return path.stem
@@ -366,8 +404,9 @@ def _run_recolor_on_image(
     object_name: str,
     lang_sam_model,
 ) -> None:
-    logger = logging.getLogger("analyse_vit.structured_recolor")
+    logger = _get_stdout_logger("analyse_vit.structured_recolor")
     anchor_image = Image.open(image_path.resolve()).convert("RGB")
+    anchor_rgb = _pil_to_np_rgb(anchor_image)
     output_tags = [_sanitize_tag(color) for color in config.colors]
     color_transforms = {
         color: _resolve_color_transform(color, config.color_hue_deg) for color in config.colors
@@ -392,7 +431,31 @@ def _run_recolor_on_image(
         return
 
     run_tag = _extract_run_tag(image_path)
-    masks_root = config.output_root / "masks" / animal / gen_model
+    if config.composite_subdir is None:
+        raise SystemExit("--composite-subdir is required when using --anchors-root.")
+
+    if config.anchors_root is None:
+        raise SystemExit("--anchors-root is required when using --composite-subdir.")
+
+    outputs_ready = True
+    for output_tag in output_tags:
+        out_dir = (
+            config.output_root
+            / "colour"
+            / config.composite_subdir
+            / animal
+            / output_tag
+            / gen_model
+            / "images"
+        )
+        if not any(out_dir.glob(f"{animal}_{output_tag}_{run_tag}*.png")):
+            outputs_ready = False
+            break
+    if outputs_ready:
+        logger.info("Outputs already exist; skipping SAM prediction: %s", image_path)
+        return
+
+    masks_root = config.anchors_root / animal / gen_model / "masks"
     masks_root.mkdir(parents=True, exist_ok=True)
 
     def _mask_suffix(mask_index: int) -> str:
@@ -416,15 +479,31 @@ def _run_recolor_on_image(
 
         for color, transform in color_transforms.items():
             output_tag = _sanitize_tag(color)
-            rgb = _apply_color_transform(_pil_to_np_rgb(anchor_image), mask, transform, config.min_saturation)
-            out_dir = config.output_root / "colour" / animal / output_tag / gen_model / "images"
+            rgb = _apply_color_transform(anchor_rgb, mask, transform, config.min_saturation)
+            out_dir = (
+                config.output_root
+                / "colour"
+                / config.composite_subdir
+                / animal
+                / output_tag
+                / gen_model
+                / "images"
+            )
             out_dir.mkdir(parents=True, exist_ok=True)
             out_name = f"{animal}_{output_tag}_{run_tag}{mask_suffix}.png"
-            _np_to_pil(rgb, "RGB").save(out_dir / out_name)
+            out_path = out_dir / out_name
+            if out_path.exists():
+                logger.info("Output already exists; skipping save: %s", out_path)
+            else:
+                _np_to_pil(rgb, "RGB").save(out_path)
             if config.save_rgba:
                 rgba = np.dstack([rgb, mask])
                 rgba_name = f"{animal}_{output_tag}_{run_tag}_rgba{mask_suffix}.png"
-                _np_to_pil(rgba, "RGBA").save(out_dir / rgba_name)
+                rgba_path = out_dir / rgba_name
+                if rgba_path.exists():
+                    logger.info("Output already exists; skipping save: %s", rgba_path)
+                else:
+                    _np_to_pil(rgba, "RGBA").save(rgba_path)
 
     logger.info("Recolor complete for %s.", image_path)
 
@@ -436,6 +515,10 @@ def main_recolor(argv: Optional[list[str]] = None) -> None:
         anchor_items = _iter_anchor_images(config.anchors_root, config.gen_model, config.animals)
         if not anchor_items:
             raise SystemExit(f"No anchor images found under {config.anchors_root}")
+        if config.num_shards > 1:
+            anchor_items = anchor_items[config.shard_index :: config.num_shards]
+            if not anchor_items:
+                raise SystemExit("No anchor images assigned to this shard.")
         for path, animal, gen_model in anchor_items:
             prompt_name = animal if config.object_name == "auto" else config.object_name
             _run_recolor_on_image(path, animal, gen_model, config, prompt_name, lang_sam_model)
