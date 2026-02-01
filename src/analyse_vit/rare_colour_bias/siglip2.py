@@ -176,17 +176,24 @@ def extract_features_siglip2(
                         LOGGER.info("Feature extraction: SigLIP2 attention_pooling via model.get_image_features().")
                     logged = True
             else:
-                outputs = model(**inputs)
+                pixel_values = inputs.get("pixel_values") if isinstance(inputs, Mapping) else None
+                if pixel_values is None:
+                    raise ValueError("siglip2: pixel_values missing; cannot compute cls/mean_patch without images.")
+                if not hasattr(model, "vision_model"):
+                    raise ValueError(
+                        "siglip2: model.vision_model is required for cls/mean_patch but is missing on this model."
+                    )
+                outputs = model.vision_model(pixel_values=pixel_values)
                 try:
                     sequence, source = _select_sequence_from_outputs(outputs)
                     batch_features = _pool_from_sequence(sequence, pooling=pooling, label="siglip2")
                     if not logged:
-                        LOGGER.info("Feature extraction: SigLIP2 %s via model.forward -> %s.", pooling, source)
+                        LOGGER.info("Feature extraction: SigLIP2 %s via model.vision_model -> %s.", pooling, source)
                         logged = True
                 except ValueError as exc:
                     if pooling != "cls":
                         raise ValueError(
-                            "siglip2: cls/mean_patch requires sequence outputs; model.forward did not return tokens."
+                            "siglip2: cls/mean_patch requires sequence outputs; vision_model did not return tokens."
                         ) from exc
 
                     pooled, source = _select_pooled_from_outputs(outputs)

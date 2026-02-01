@@ -53,6 +53,8 @@ class ColorParams:
 class RunConfig:
     output_dir: Path
     background_prompt: Optional[str]
+    background_only: bool
+    background_grayscale: bool
     prompt: str
     negative_prompt: Optional[str]
     object_name: Optional[str]

@@ -6,7 +6,7 @@
 - 例: `RESULTS_DIR=/home/akasakam/.../results/raw/anchors/kangaroo/flux/20260123_170000`
 
 ## 適用範囲
-- すべての `.sbatch` / `.sh` スクリプトに適用すること。
+- すべての `.slurm` / `.sh` スクリプトに適用すること。
 - 今後の修正でもこの方針を維持すること。
 
 ## エラーメッセージ指針

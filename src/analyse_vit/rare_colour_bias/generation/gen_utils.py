@@ -66,8 +66,14 @@ def _prepare_run_dirs(output_dir: Path) -> RunDirs:
     return RunDirs(root=output_dir, inputs=inputs_dir, masks=masks_dir, outputs=outputs_dir, meta=meta_dir)
 
 
-def _setup_logger(run_dirs: RunDirs, *, name_suffix: str = "") -> logging.Logger:
-    cache_key = f"{run_dirs.root}{name_suffix}"
+def _prepare_run_dirs_flat(output_dir: Path) -> RunDirs:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return RunDirs(root=output_dir, inputs=output_dir, masks=output_dir, outputs=output_dir, meta=output_dir)
+
+
+def _setup_logger(run_dirs: RunDirs, *, name_suffix: str = "", log_path: Optional[Path] = None) -> logging.Logger:
+    log_path = log_path or (run_dirs.meta / "run.log")
+    cache_key = f"{run_dirs.root}{name_suffix}:{log_path}"
     cached = _LOGGER_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -85,7 +91,7 @@ def _setup_logger(run_dirs: RunDirs, *, name_suffix: str = "") -> logging.Logger
         except Exception:
             pass
 
-    file_handler = logging.FileHandler(run_dirs.meta / "run.log")
+    file_handler = logging.FileHandler(log_path)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
@@ -282,12 +288,13 @@ def _derive_run_seed(base_seed: int, run_index: int, salt: int) -> int:
 
 
 def _create_timestamp_dir(base_dir: Path) -> Path:
-    base_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = base_dir.expanduser()
+    base_dir.parent.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    run_root = base_dir / timestamp
     suffix = 1
+    run_root = base_dir.parent / timestamp / base_dir.name
     while run_root.exists():
-        run_root = base_dir / f"{timestamp}_{suffix:02d}"
+        run_root = base_dir.parent / f"{timestamp}_{suffix:02d}" / base_dir.name
         suffix += 1
     run_root.mkdir(parents=True, exist_ok=False)
     return run_root

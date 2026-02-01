@@ -6,10 +6,10 @@
 sbatch を投げたジョブの状態とログ末尾を監視する簡易ウォッチャです。
 
 ```bash
-./scripts/sbatch/utils/sbatch_watch.sh --gpu-ram 40 job.sbatch
+./scripts/sbatch/utils/sbatch_watch.sh --gpu-ram 40 job.slurm
 ```
 
-ただし、job.sbatchの前に下記を追加すること
+ただし、job.slurmの前に下記を追加すること
 ```bash
 source /home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit/scripts/sbatch/utils/race_gurad.sh
 ```

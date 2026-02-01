@@ -28,6 +28,7 @@ from ..generation.gen_utils import (
     _collect_runtime_info,
     _load_required_rgb_image,
     _prepare_run_dirs,
+    _prepare_run_dirs_flat,
     _resolve_run_input,
     _setup_logger,
 )
@@ -44,17 +45,51 @@ def _ensure_batch_compatible(run_configs: list[RunConfig]) -> RunConfig:
             raise ValueError("Batch generation requires identical flux parameters for all runs.")
         if cfg.background_prompt != base.background_prompt:
             raise ValueError("Batch generation requires identical background prompt for all runs.")
+        if cfg.background_only != base.background_only:
+            raise ValueError("Batch generation requires identical background-only setting for all runs.")
+        if cfg.background_grayscale != base.background_grayscale:
+            raise ValueError("Batch generation requires identical background grayscale setting for all runs.")
     return base
 
 
-def _run_generation(run_configs: list[RunConfig], pipe=None):
+def _run_generation(
+    run_configs: list[RunConfig],
+    pipe=None,
+    *,
+    flat_outputs: bool = False,
+    flat_root: Optional[Path] = None,
+    flat_logs_root: Optional[Path] = None,
+    batch_size: int = 1,
+):
     base = _ensure_batch_compatible(run_configs)
     run_states: list[Tuple[RunConfig, RunDirs, logging.Logger]] = []
     runtime_info = _collect_runtime_info(run_configs[0].output_dir if run_configs else None)
 
+    if flat_outputs:
+        if flat_root is None:
+            raise ValueError("flat_outputs requires flat_root to be set.")
+        flat_root.mkdir(parents=True, exist_ok=True)
+        if flat_logs_root is None:
+            flat_logs_root = flat_root
+        flat_logs_root.mkdir(parents=True, exist_ok=True)
+
     for cfg in run_configs:
-        run_dirs = _prepare_run_dirs(cfg.output_dir)
-        logger = _setup_logger(run_dirs)
+        if flat_outputs:
+            run_dirs = RunDirs(
+                root=flat_root,
+                inputs=flat_root,
+                masks=flat_root,
+                outputs=flat_root,
+                meta=flat_logs_root,
+            )
+            logger = _setup_logger(
+                run_dirs,
+                name_suffix=f".run{cfg.run_index:02d}",
+                log_path=flat_logs_root / f"run_{cfg.run_index:02d}.log",
+            )
+        else:
+            run_dirs = _prepare_run_dirs(cfg.output_dir)
+            logger = _setup_logger(run_dirs)
         logger.info("Starting run %03d (seed offset=%d).", cfg.run_index, cfg.seed_offset)
         logger.info(
             "Generation settings: size=%dx%d steps=%d guidance=%.2f max_seq=%d dtype=%s device=%s",
@@ -73,6 +108,32 @@ def _run_generation(run_configs: list[RunConfig], pipe=None):
         logger.info("Prompt elements: %s", cfg.prompt_elements)
         logger.info("Seeds: bg=%d primary=%d", cfg.seed_bg, cfg.seed)
         run_states.append((cfg, run_dirs, logger))
+
+    skip_map: Dict[int, bool] = {}
+    for cfg, run_dirs, logger in run_states:
+        output_paths: list[Path] = []
+        if flat_outputs:
+            anchor_path = flat_root / f"run_{cfg.run_index:02d}.png"
+            bg_path = flat_root / f"run_{cfg.run_index:02d}_bg.png"
+        else:
+            anchor_path = run_dirs.inputs / "anchor.png"
+            bg_path = run_dirs.inputs / "bg.png"
+
+        if cfg.background_only:
+            output_paths.append(bg_path)
+        else:
+            output_paths.append(anchor_path)
+            if cfg.background_prompt:
+                output_paths.append(bg_path)
+
+        exists = any(p.exists() for p in output_paths)
+        if exists:
+            logger.info(
+                "Skipping generation for run %03d (output already exists: %s).",
+                cfg.run_index,
+                ", ".join(str(p) for p in output_paths if p.exists()),
+            )
+        skip_map[cfg.run_index] = exists
 
     if pipe is None:
         # Use base run's meta logger for pipeline loading logs
@@ -97,7 +158,16 @@ def _run_generation(run_configs: list[RunConfig], pipe=None):
     else:
         guidance_scale = base.flux.guidance_scale
 
+    if batch_size <= 0:
+        raise ValueError("--batch-size must be >= 1.")
+    if base.flux.pipeline == "qwen" and batch_size != 1:
+        raise ValueError("Batch generation is not supported for qwen; set --batch-size 1.")
+
     has_background_prompt = bool(base.background_prompt)
+    background_only = bool(base.background_only)
+    background_grayscale = bool(base.background_grayscale)
+    if background_only and not has_background_prompt:
+        raise ValueError("--background-only requires --background-prompt.")
 
     # Background generation: preserve prior behavior
     shared_bg: Optional[Image.Image] = None
@@ -117,14 +187,57 @@ def _run_generation(run_configs: list[RunConfig], pipe=None):
             base.flux.max_sequence_length,
             base.device,
         )[0]
+        if background_grayscale:
+            shared_bg = shared_bg.convert("L").convert("RGB")
         base_logger.info("Shared background generation finished in %.2fs.", time.perf_counter() - start)
 
+    active_run_states = [(cfg, run_dirs, logger) for cfg, run_dirs, logger in run_states if not skip_map[cfg.run_index]]
+    timings_map: Dict[int, Dict[str, Optional[float]]] = {
+        cfg.run_index: {"background_seconds": None, "anchor_seconds": None} for cfg, _, _ in active_run_states
+    }
+    anchor_images: Dict[int, Image.Image] = {}
+
+    if not background_only and base.flux.pipeline != "qwen" and batch_size > 1 and active_run_states:
+        batch_logger = active_run_states[0][2]
+        batch_logger.info("Generating anchor images in batches of %d.", batch_size)
+        for start_idx in range(0, len(active_run_states), batch_size):
+            batch = active_run_states[start_idx : start_idx + batch_size]
+            prompts = [cfg.prompt for cfg, _, _ in batch]
+            seeds = [cfg.seed for cfg, _, _ in batch]
+            batch_logger.info(
+                "Waiting for diffusion inference (batch size %d, prompts %d-%d)...",
+                len(batch),
+                start_idx,
+                start_idx + len(batch) - 1,
+            )
+            start = time.perf_counter()
+            images = _generate_images(
+                pipe,
+                prompts,
+                seeds,
+                base.flux.width,
+                base.flux.height,
+                base.flux.num_inference_steps,
+                guidance_scale,
+                base.flux.max_sequence_length,
+                base.device,
+                negative_prompt,
+            )
+            batch_time = time.perf_counter() - start
+            per_image = batch_time / max(1, len(images))
+            batch_logger.info(
+                "Anchor batch finished in %.2fs (avg %.2fs / image).", batch_time, per_image
+            )
+            for (cfg, _, logger), image in zip(batch, images):
+                anchor_images[cfg.run_index] = image
+                timings_map[cfg.run_index]["anchor_seconds"] = per_image
+                logger.info("Using batch-generated anchor image (batch_size=%d).", batch_size)
+
     for cfg, run_dirs, logger in run_states:
+        if skip_map[cfg.run_index]:
+            continue
         bg_image: Optional[Image.Image] = None
-        timings: Dict[str, Optional[float]] = {
-            "background_seconds": None,
-            "anchor_seconds": None,
-        }
+        timings = timings_map[cfg.run_index]
         if has_background_prompt:
             if shared_bg is None:
                 logger.info("Generating background image (single forward).")
@@ -142,6 +255,8 @@ def _run_generation(run_configs: list[RunConfig], pipe=None):
                     cfg.device,
                     negative_prompt,
                 )[0]
+                if background_grayscale:
+                    bg_image = bg_image.convert("L").convert("RGB")
                 timings["background_seconds"] = time.perf_counter() - start
                 logger.info("Background generation finished in %.2fs.", timings["background_seconds"])
             else:
@@ -150,7 +265,10 @@ def _run_generation(run_configs: list[RunConfig], pipe=None):
         else:
             logger.info("Skipping background generation because --background-prompt was not provided.")
 
-        if cfg.flux.pipeline == "qwen":
+        anchor_image: Optional[Image.Image] = None
+        if background_only:
+            logger.info("Skipping anchor generation because --background-only was provided.")
+        elif cfg.flux.pipeline == "qwen":
             logger.info("Generating anchor image sequentially (qwen uses more VRAM per sample).")
             logger.info("Waiting for diffusion inference (base anchor)...")
             start = time.perf_counter()
@@ -168,7 +286,7 @@ def _run_generation(run_configs: list[RunConfig], pipe=None):
             )[0]
             timings["anchor_seconds"] = time.perf_counter() - start
             logger.info("Primary anchor finished in %.2fs.", timings["anchor_seconds"])
-        else:
+        elif batch_size == 1:
             logger.info("Generating anchor image (single prompt).")
             logger.info("Waiting for diffusion inference (this can take a while)...")
             start = time.perf_counter()
@@ -186,12 +304,26 @@ def _run_generation(run_configs: list[RunConfig], pipe=None):
             )[0]
             timings["anchor_seconds"] = time.perf_counter() - start
             logger.info("Anchor generation finished in %.2fs.", timings["anchor_seconds"])
+        else:
+            anchor_image = anchor_images.get(cfg.run_index)
+            if anchor_image is None:
+                raise RuntimeError("Batch-generated anchor image is missing for run index %d." % cfg.run_index)
 
         logger.info("Saving generated inputs...")
-        if bg_image is not None:
-            bg_image.save(run_dirs.inputs / "bg.png")
-        anchor_image.save(run_dirs.inputs / "anchor.png")
-        logger.info("Saved generated inputs to %s", run_dirs.inputs)
+        if flat_outputs:
+            anchor_path = flat_root / f"run_{cfg.run_index:02d}.png"
+            bg_path = flat_root / f"run_{cfg.run_index:02d}_bg.png"
+            if anchor_image is not None:
+                anchor_image.save(anchor_path)
+            if bg_image is not None:
+                bg_image.save(bg_path)
+            logger.info("Saved generated inputs to %s", flat_root)
+        else:
+            if bg_image is not None:
+                bg_image.save(run_dirs.inputs / "bg.png")
+            if anchor_image is not None:
+                anchor_image.save(run_dirs.inputs / "anchor.png")
+            logger.info("Saved generated inputs to %s", run_dirs.inputs)
 
         generation_meta: Dict[str, Any] = {
             "stage": "generation",
@@ -202,6 +334,8 @@ def _run_generation(run_configs: list[RunConfig], pipe=None):
             "prompt": cfg.prompt,
             "negative_prompt": cfg.negative_prompt,
             "background_prompt": cfg.background_prompt,
+            "background_only": cfg.background_only,
+            "background_grayscale": cfg.background_grayscale,
             "prompt_elements_json": str(cfg.prompt_elements_path) if cfg.prompt_elements_path else None,
             "prompt_elements": cfg.prompt_elements,
             "color": cfg.color_name,
@@ -218,17 +352,25 @@ def _run_generation(run_configs: list[RunConfig], pipe=None):
             "hf_token_present": bool(cfg.hf_token),
             "timings": timings,
             "outputs": {
-                "root": str(run_dirs.root),
+                "root": str(flat_root if flat_outputs else run_dirs.root),
                 "inputs": {
-                    "bg": str(run_dirs.inputs / "bg.png") if bg_image is not None else None,
-                    "anchor": str(run_dirs.inputs / "anchor.png"),
+                    "bg": str((flat_root / f"run_{cfg.run_index:02d}_bg.png") if bg_image is not None else None)
+                    if flat_outputs
+                    else (str(run_dirs.inputs / "bg.png") if bg_image is not None else None),
+                    "anchor": str((flat_root / f"run_{cfg.run_index:02d}.png") if anchor_image is not None else None)
+                    if flat_outputs
+                    else (str(run_dirs.inputs / "anchor.png") if anchor_image is not None else None),
                 },
             },
             "runtime": runtime_info,
         }
 
-        with (run_dirs.meta / "generation_meta.json").open("w", encoding="utf-8") as f:
-            json.dump(_json_safe(generation_meta), f, indent=2, ensure_ascii=True)
+        if flat_outputs:
+            with (flat_logs_root / f"run_{cfg.run_index:02d}.json").open("w", encoding="utf-8") as f:
+                json.dump(_json_safe(generation_meta), f, indent=2, ensure_ascii=True)
+        else:
+            with (run_dirs.meta / "generation_meta.json").open("w", encoding="utf-8") as f:
+                json.dump(_json_safe(generation_meta), f, indent=2, ensure_ascii=True)
 
     return pipe
 

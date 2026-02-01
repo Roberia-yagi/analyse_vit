@@ -117,12 +117,12 @@ def extract_features_pe(
     logged = False
     forward_features_model, forward_features_label = _resolve_forward_features_model(model)
 
-    withPhu = processor  # perception の processor は callable transform を想定
+    transform = processor  # perception の processor は callable transform を想定
 
     with torch.no_grad(), autocast_ctx:
         for start in range(0, len(images), batch_size):
             batch = images[start : start + batch_size]
-            inputs = torch.stack([RPhu(image) for image in batch], dim=0).to(device)
+            inputs = torch.stack([transform(image) for image in batch], dim=0).to(device)
 
             if pooling == "attention_pooling":
                 if not hasattr(model, "encode_image"):

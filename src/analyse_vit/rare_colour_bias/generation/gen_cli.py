@@ -39,7 +39,7 @@ from .gen_utils import (
 def _parse_args(
     argv: Optional[Iterable[str]] = None,
     mode: str = "full",
-) -> Tuple[RunConfig, int, Optional[Path]]:
+) -> Tuple[RunConfig, int, Optional[Path], int]:
     parser = argparse.ArgumentParser(description="Text-to-image + SAM composite pipeline")
     parser.add_argument(
         "--output-dir",
@@ -51,6 +51,16 @@ def _parse_args(
         "--background-prompt",
         default=None,
         help="Background prompt (optional; if omitted, background image is not generated).",
+    )
+    parser.add_argument(
+        "--background-only",
+        action="store_true",
+        help="Generate only the background image (skip anchor generation).",
+    )
+    parser.add_argument(
+        "--background-grayscale",
+        action="store_true",
+        help="Convert generated background to grayscale before saving.",
     )
     parser.add_argument("--prompt", default=None)
     parser.add_argument(
@@ -72,6 +82,7 @@ def _parse_args(
     parser.add_argument("--seed-bg", type=int, default=None)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--num-runs", type=int, default=3)
+    parser.add_argument("--batch-size", type=int, default=1, help="Batch size for non-qwen generation.")
 
     parser.add_argument("--pipeline", default="flux", choices=list(_PIPELINES.keys()))
     parser.add_argument("--model-id", default=None)
@@ -147,10 +158,18 @@ def _parse_args(
     if require_generation:
         if output_dir is None:
             raise ValueError("--output-dir is required for generation runs.")
-        if prompt_elements_path is None and prompt is None:
-            raise ValueError("--prompt or --prompt-elements-json must be provided.")
-        if background_prompt is not None and args.seed_bg is None:
-            raise ValueError("--seed-bg is required when --background-prompt is provided.")
+        if args.background_only:
+            if background_prompt is None:
+                raise ValueError("--background-only requires --background-prompt.")
+            if args.seed_bg is None:
+                raise ValueError("--seed-bg is required when --background-only is used.")
+            if prompt_elements_path is not None or prompt is not None:
+                raise ValueError("--background-only does not use --prompt or --prompt-elements-json.")
+        else:
+            if prompt_elements_path is None and prompt is None:
+                raise ValueError("--prompt or --prompt-elements-json must be provided.")
+            if background_prompt is not None and args.seed_bg is None:
+                raise ValueError("--seed-bg is required when --background-prompt is provided.")
 
     if require_composite:
         if args.color is None:
@@ -160,6 +179,8 @@ def _parse_args(
 
     if run_root_override is None and mode == "composite":
         raise ValueError("--run-root is required for composite-only runs.")
+    if args.background_only and mode != "generate":
+        raise ValueError("--background-only is supported only in generate mode.")
     if output_dir is None and run_root_override is not None:
         output_dir = run_root_override
     prompt = prompt or ""
@@ -258,6 +279,8 @@ def _parse_args(
         RunConfig(
             output_dir=output_dir,
             background_prompt=background_prompt,
+            background_only=bool(args.background_only),
+            background_grayscale=bool(args.background_grayscale),
             prompt=prompt,
             negative_prompt=negative_prompt,
             object_name=object_name,
@@ -277,6 +300,7 @@ def _parse_args(
         ),
         int(args.num_runs),
         run_root_override,
+        int(args.batch_size),
     )
 
 
@@ -336,7 +360,7 @@ def _build_run_configs(
 
 
 def main_generate(argv: Optional[Iterable[str]] = None) -> None:
-    config, num_runs, run_root_override = _parse_args(argv, mode="generate")
+    config, num_runs, run_root_override, batch_size = _parse_args(argv, mode="generate")
     run_root = run_root_override or _create_timestamp_dir(config.output_dir)
     if run_root_override is not None and not run_root.exists():
         run_root.mkdir(parents=True, exist_ok=True)
@@ -352,7 +376,7 @@ def main_generate(argv: Optional[Iterable[str]] = None) -> None:
         config.flux.local_files_only,
     )
 
-    _run_generation(run_configs, pipe=pipe)
+    _run_generation(run_configs, pipe=pipe, flat_outputs=True, flat_root=run_root, batch_size=batch_size)
 
     try:
         pipe.to("cpu")
@@ -365,7 +389,7 @@ def main_generate(argv: Optional[Iterable[str]] = None) -> None:
 
 
 def main_composite(argv: Optional[Iterable[str]] = None) -> None:
-    config, num_runs, run_root_override = _parse_args(argv, mode="composite")
+    config, num_runs, run_root_override, _ = _parse_args(argv, mode="composite")
     run_root = run_root_override
 
     run_configs = _build_run_configs(config, num_runs, run_root)
@@ -379,7 +403,7 @@ def main_composite(argv: Optional[Iterable[str]] = None) -> None:
 
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
-    config, num_runs, run_root_override = _parse_args(argv, mode="full")
+    config, num_runs, run_root_override, batch_size = _parse_args(argv, mode="full")
     run_root = run_root_override or _create_timestamp_dir(config.output_dir)
     if run_root_override is not None and not run_root.exists():
         run_root.mkdir(parents=True, exist_ok=True)
@@ -395,7 +419,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         config.flux.local_files_only,
     )
 
-    _run_generation(run_configs, pipe=pipe)
+    _run_generation(run_configs, pipe=pipe, batch_size=batch_size)
 
     try:
         pipe.to("cpu")
