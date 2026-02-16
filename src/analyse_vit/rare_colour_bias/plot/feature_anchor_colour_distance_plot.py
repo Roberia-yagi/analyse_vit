@@ -4,7 +4,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import torch
@@ -173,6 +173,25 @@ def _summarize(metrics: Dict[str, Dict[str, Dict[str, List[float]]]]) -> Dict[st
     return summary
 
 
+def _split_colours(colours_sorted: Sequence[str], parts: int = 2) -> List[List[str]]:
+    if not colours_sorted:
+        return []
+    if parts <= 1 or len(colours_sorted) <= 1:
+        return [list(colours_sorted)]
+    chunk_base = len(colours_sorted) // parts
+    chunk_rem = len(colours_sorted) % parts
+    chunks: List[List[str]] = []
+    start = 0
+    for idx in range(parts):
+        size = chunk_base + (1 if idx < chunk_rem else 0)
+        if size <= 0:
+            continue
+        end = start + size
+        chunks.append(list(colours_sorted[start:end]))
+        start = end
+    return chunks
+
+
 def _plot_metric_grid(
     *,
     metric_key: str,
@@ -181,22 +200,34 @@ def _plot_metric_grid(
     anchor_centers: Dict[str, torch.Tensor],
     anchor_self_means: Dict[str, Dict[str, float]],
     used_animals: List[str],
-    colours_sorted: List[str],
+    colours_to_plot: Sequence[str],
     colour_to_marker: Dict[str, str],
     colour_to_color: Dict[str, str],
-    out_dir: Path,
+    out_path: Path,
     title: str,
     dpi: int,
+    fig_width: float,
+    fig_height: float,
+    panel_label: Optional[str] = None,
 ) -> None:
-    fig, ax = plt.subplots(figsize=(10.0, 7.5))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     x_positions = list(range(len(used_animals)))
-    for colour in colours_sorted:
+    for colour in colours_to_plot:
         marker = colour_to_marker[colour]
         color = colour_to_color.get(colour, "black")
+        line_color = color if colour != "white" else "#bdbdbd"
         means = []
         for animal in used_animals:
             values = distances.get(metric_key, {}).get(colour, {}).get(animal, [])
-            means.append(_mean(values))
+            means.append(_mean(values) if values else float("nan"))
+        ax.plot(
+            x_positions,
+            means,
+            color=line_color,
+            linewidth=1.7,
+            alpha=0.75,
+            zorder=1,
+        )
         ax.scatter(
             x_positions,
             means,
@@ -259,7 +290,8 @@ def _plot_metric_grid(
     ax.set_xticklabels(used_animals, rotation=45, ha="right", fontsize=16)
     ax.set_ylabel(metric_label, fontsize=17)
     ax.tick_params(axis="y", labelsize=16)
-    ax.set_title(title, fontsize=18)
+    plot_title = f"{title} | {panel_label}" if panel_label else title
+    ax.set_title(plot_title, fontsize=18)
 
     handles, labels = ax.get_legend_handles_labels()
     if handles:
@@ -273,7 +305,7 @@ def _plot_metric_grid(
         )
 
     fig.tight_layout(rect=[0.0, 0.0, 1.0, 1.0])
-    fig.savefig(out_dir, dpi=dpi, bbox_inches="tight")
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -303,6 +335,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Output root for plots (default: <selected-root>/analysis/anchor_colour_distance).",
     )
     parser.add_argument("--dpi", type=int, default=200, help="Figure DPI.")
+    parser.add_argument("--fig-width", type=float, default=15.0, help="Figure width in inches.")
+    parser.add_argument("--fig-height", type=float, default=9.5, help="Figure height in inches.")
     return parser
 
 
@@ -313,6 +347,8 @@ def _run_structured(
     vision_models: Sequence[str],
     poolings: Sequence[str],
     dpi: int,
+    fig_width: float,
+    fig_height: float,
 ) -> None:
     anchors_root = selected_root / "anchors" / COMPOSITE_SUBDIR
     colour_root = selected_root / "colour" / COMPOSITE_SUBDIR
@@ -397,6 +433,7 @@ def _run_structured(
                 for colour in colours_sorted:
                     if colour not in colour_to_marker:
                         colour_to_marker[colour] = marker_cycle[len(colour_to_marker) % len(marker_cycle)]
+                colour_groups = _split_colours(colours_sorted, parts=2)
 
                 out_dir = output_root / gen_model / vision / pooling
                 out_dir.mkdir(parents=True, exist_ok=True)
@@ -413,66 +450,40 @@ def _run_structured(
                     encoding="utf-8",
                 )
                 title = f"{gen_model} | {vision} | {pooling}"
-                _plot_metric_grid(
-                    metric_key="distance",
-                    metric_label="L2 distance from anchor center",
-                    distances=distances,
-                    anchor_centers=anchor_centers,
-                    anchor_self_means=anchor_self_means,
-                    used_animals=used_animals,
-                    colours_sorted=colours_sorted,
-                    colour_to_marker=colour_to_marker,
-                    colour_to_color=colour_to_color,
-                    out_dir=out_dir / "anchor_colour_distance_grid.png",
-                    title=title,
-                    dpi=dpi,
-                )
-                _plot_metric_grid(
-                    metric_key="norm_diff",
-                    metric_label="| ||a|| - ||b|| | (norm diff)",
-                    distances=distances,
-                    anchor_centers=anchor_centers,
-                    anchor_self_means=anchor_self_means,
-                    used_animals=used_animals,
-                    colours_sorted=colours_sorted,
-                    colour_to_marker=colour_to_marker,
-                    colour_to_color=colour_to_color,
-                    out_dir=out_dir / "anchor_colour_norm_diff_grid.png",
-                    title=title,
-                    dpi=dpi,
-                )
-                _plot_metric_grid(
-                    metric_key="cosine",
-                    metric_label="cos(a, b) (angle)",
-                    distances=distances,
-                    anchor_centers=anchor_centers,
-                    anchor_self_means=anchor_self_means,
-                    used_animals=used_animals,
-                    colours_sorted=colours_sorted,
-                    colour_to_marker=colour_to_marker,
-                    colour_to_color=colour_to_color,
-                    out_dir=out_dir / "anchor_colour_cosine_grid.png",
-                    title=title,
-                    dpi=dpi,
-                )
-                _plot_metric_grid(
-                    metric_key="relative_change",
-                    metric_label="||a-b|| / ||a|| (relative change)",
-                    distances=distances,
-                    anchor_centers=anchor_centers,
-                    anchor_self_means=anchor_self_means,
-                    used_animals=used_animals,
-                    colours_sorted=colours_sorted,
-                    colour_to_marker=colour_to_marker,
-                    colour_to_color=colour_to_color,
-                    out_dir=out_dir / "anchor_colour_relative_change_grid.png",
-                    title=title,
-                    dpi=dpi,
-                )
-                LOGGER.info("Saved plot: %s", out_dir / "anchor_colour_distance_grid.png")
-                LOGGER.info("Saved plot: %s", out_dir / "anchor_colour_norm_diff_grid.png")
-                LOGGER.info("Saved plot: %s", out_dir / "anchor_colour_cosine_grid.png")
-                LOGGER.info("Saved plot: %s", out_dir / "anchor_colour_relative_change_grid.png")
+                metric_specs = [
+                    ("distance", "L2 distance from anchor center", "anchor_colour_distance_grid"),
+                    ("norm_diff", "| ||a|| - ||b|| | (norm diff)", "anchor_colour_norm_diff_grid"),
+                    ("cosine", "cos(a, b) (angle)", "anchor_colour_cosine_grid"),
+                    ("relative_change", "||a-b|| / ||a|| (relative change)", "anchor_colour_relative_change_grid"),
+                ]
+                total_parts = len(colour_groups)
+                for metric_key, metric_label, filename_stem in metric_specs:
+                    for part_idx, colour_group in enumerate(colour_groups, start=1):
+                        panel_label = f"part {part_idx}/{total_parts}" if total_parts > 1 else None
+                        filename = (
+                            f"{filename_stem}_part{part_idx}.png"
+                            if total_parts > 1
+                            else f"{filename_stem}.png"
+                        )
+                        out_path = out_dir / filename
+                        _plot_metric_grid(
+                            metric_key=metric_key,
+                            metric_label=metric_label,
+                            distances=distances,
+                            anchor_centers=anchor_centers,
+                            anchor_self_means=anchor_self_means,
+                            used_animals=used_animals,
+                            colours_to_plot=colour_group,
+                            colour_to_marker=colour_to_marker,
+                            colour_to_color=colour_to_color,
+                            out_path=out_path,
+                            title=title,
+                            dpi=dpi,
+                            fig_width=fig_width,
+                            fig_height=fig_height,
+                            panel_label=panel_label,
+                        )
+                        LOGGER.info("Saved plot: %s", out_path)
 
 
 def main() -> None:
@@ -525,7 +536,16 @@ def main() -> None:
     if not poolings:
         raise SystemExit("No pooling directories found under anchors.")
 
-    _run_structured(selected_root, output_root, gen_models, vision_models, poolings, args.dpi)
+    _run_structured(
+        selected_root,
+        output_root,
+        gen_models,
+        vision_models,
+        poolings,
+        args.dpi,
+        args.fig_width,
+        args.fig_height,
+    )
 
 
 if __name__ == "__main__":

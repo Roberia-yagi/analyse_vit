@@ -474,15 +474,25 @@ def _plot_all_series(
     x_positions = list(range(len(animals)))
     for label, values, marker, color in series:
         edge_kwargs: Dict[str, float | str] = {}
-        if color not in {"black"}:
-            try:
-                rgba = mcolors.to_rgba(color)
-            except ValueError as exc:
-                raise SystemExit(
-                    f"Error: plot color '{color}' is not a valid Matplotlib color name or hex."
-                ) from exc
-            if rgba[:3] == (1.0, 1.0, 1.0):
-                edge_kwargs = {"edgecolor": "black", "linewidth": 1.2}
+        try:
+            rgba = mcolors.to_rgba(color)
+        except ValueError as exc:
+            raise SystemExit(
+                f"Error: plot color '{color}' is not a valid Matplotlib color name or hex."
+            ) from exc
+        line_color = color
+        if rgba[:3] == (1.0, 1.0, 1.0):
+            edge_kwargs = {"edgecolor": "black", "linewidth": 1.2}
+            line_color = "black"
+        ax.plot(
+            x_positions,
+            values,
+            color=line_color,
+            linewidth=1.2,
+            alpha=0.45,
+            zorder=2,
+            label=None,
+        )
         ax.scatter(x_positions, values, s=85, alpha=0.9, label=label, marker=marker, color=color)
         if edge_kwargs:
             ax.scatter(

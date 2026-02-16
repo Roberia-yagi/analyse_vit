@@ -192,6 +192,15 @@ def _plot_metric_grid(
         for animal in used_animals:
             values = distances.get(metric_key, {}).get(angle, {}).get(animal, [])
             means.append(_mean(values))
+        ax.plot(
+            x_positions,
+            means,
+            color=color,
+            linewidth=1.2,
+            alpha=0.45,
+            zorder=2,
+            label=None,
+        )
         ax.scatter(
             x_positions,
             means,
@@ -237,6 +246,15 @@ def _plot_metric_grid(
             marker="X",
             color="black",
         )
+        ax.plot(
+            x_positions,
+            other_means,
+            color="black",
+            linewidth=1.2,
+            alpha=0.45,
+            zorder=2,
+            label=None,
+        )
 
     if anchor_self_means:
         self_means = [anchor_self_means.get(animal, {}).get(metric_key, float("nan")) for animal in used_animals]
@@ -248,6 +266,15 @@ def _plot_metric_grid(
             label="self_mean",
             marker="x",
             color="black",
+        )
+        ax.plot(
+            x_positions,
+            self_means,
+            color="black",
+            linewidth=1.2,
+            alpha=0.45,
+            zorder=2,
+            label=None,
         )
 
     ax.set_xticks(x_positions)

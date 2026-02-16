@@ -5,7 +5,8 @@ set -euo pipefail
 # ------------------------------
 # Pushover notification setup
 SCRIPT_BASENAME="$(basename "${BASH_SOURCE[0]}")"
-PROJECT_ROOT="${PWD}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${PROJECT_ROOT}/.env"
 
 pushover_send() {
@@ -56,7 +57,6 @@ notify_exit() {
 }
 trap notify_exit EXIT
 # ------------------------------
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEFAULT_RESULTS_DIR="/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit/results/selected"
 RESULTS_DIR="${RESULTS_DIR:-$DEFAULT_RESULTS_DIR}"
 if [[ -z "$RESULTS_DIR" || "$RESULTS_DIR" != /* ]]; then
@@ -88,18 +88,21 @@ if [[ ! -d "$SELECTED_ROOT/colour/$COMPOSITE_SUBDIR" && ! -d "$SELECTED_ROOT/col
 fi
 
 OUTPUT_DIR="${OUTPUT_DIR:-}"
+DPI=200
+FIG_WIDTH=18.0
+FIG_HEIGHT=11.0
 
 export PYTHONNOUSERSITE=1
 unset PYTHONPATH
 
 ARGS=(
   --selected-root "$SELECTED_ROOT"
+  --dpi "$DPI"
+  --fig-width "$FIG_WIDTH"
+  --fig-height "$FIG_HEIGHT"
 )
 if [[ -n "${OUTPUT_DIR:-}" ]]; then
   ARGS+=(--output-root "$OUTPUT_DIR")
-fi
-if [[ -n "${DPI:-}" ]]; then
-  ARGS+=(--dpi "$DPI")
 fi
 if [[ -n "${PLOT_ARGS:-}" ]]; then
   read -r -a EXTRA_ARGS <<< "$PLOT_ARGS"
