@@ -79,24 +79,49 @@ if [[ ! -d "$SELECTED_ROOT" ]]; then
 fi
 
 OUTPUT_DIR="${OUTPUT_DIR:-}"
+COMPOSITE_SUBDIR="with_composite"
+DPI=200
+FIG_WIDTH=10.0
+FIG_HEIGHT=11.7
+POOLING="attention_pooling"
+GEN_MODELS=(
+  "flux"
+  "qwen"
+)
+if [[ ! -d "$SELECTED_ROOT/anchors/$COMPOSITE_SUBDIR" ]]; then
+  echo "Error: anchors root not found: $SELECTED_ROOT/anchors/$COMPOSITE_SUBDIR" >&2
+  exit 1
+fi
+if [[ ! -d "$SELECTED_ROOT/size" ]]; then
+  echo "Error: size root not found: $SELECTED_ROOT/size" >&2
+  exit 1
+fi
 
 export PYTHONNOUSERSITE=1
 unset PYTHONPATH
 
-ARGS=(
+BASE_ARGS=(
   --selected-root "$SELECTED_ROOT"
+  --composite-subdir "$COMPOSITE_SUBDIR"
+  --dpi "$DPI"
+  --fig-width "$FIG_WIDTH"
+  --fig-height "$FIG_HEIGHT"
+  --pooling "$POOLING"
 )
 if [[ -n "${OUTPUT_DIR:-}" ]]; then
-  ARGS+=(--output-root "$OUTPUT_DIR")
-fi
-if [[ -n "${DPI:-}" ]]; then
-  ARGS+=(--dpi "$DPI")
+  BASE_ARGS+=(--output-root "$OUTPUT_DIR")
 fi
 if [[ -n "${PLOT_ARGS:-}" ]]; then
   read -r -a EXTRA_ARGS <<< "$PLOT_ARGS"
-  ARGS+=("${EXTRA_ARGS[@]}")
+  BASE_ARGS+=("${EXTRA_ARGS[@]}")
 fi
 
 cd "$PROJECT_ROOT"
 uv sync --extra analysis-perception
-uv run --extra analysis-perception -- python -m analyse_vit.rare_colour_bias.plot.feature_anchor_size_distance_plot "${ARGS[@]}"
+for GEN_MODEL in "${GEN_MODELS[@]}"; do
+  ARGS=(
+    "${BASE_ARGS[@]}"
+    --gen-model "$GEN_MODEL"
+  )
+  uv run --extra analysis-perception -- python -m analyse_vit.rare_colour_bias.plot.feature_anchor_size_distance_plot "${ARGS[@]}"
+done

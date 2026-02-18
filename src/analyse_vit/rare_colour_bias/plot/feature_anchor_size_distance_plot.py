@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
@@ -13,6 +14,7 @@ LOGGER = logging.getLogger("analyse_vit.feature_anchor_size_distance_plot")
 
 DEFAULT_VISION_ORDER = ("pe-core-l14-336", "siglip2-giant-opt-patch16-384", "qwen3-vl-8b-embed")
 DEFAULT_GEN_ORDER = ("flux", "qwen", "sd3.5")
+COMPOSITE_SUBDIR = "with_composite"
 
 
 def _default_selected_root() -> Path:
@@ -197,27 +199,40 @@ def _plot_metric_grid(
     out_dir: Path,
     title: str,
     dpi: int,
+    fig_width: float,
+    fig_height: float,
 ) -> None:
-    fig, ax = plt.subplots(figsize=(10.0, 7.5))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     x_positions = list(range(len(used_animals)))
     for size in sizes_sorted:
-        marker = size_to_marker[size]
         color = size_to_color.get(size, "black")
         means = []
         for animal in used_animals:
             values = distances.get(metric_key, {}).get(size, {}).get(animal, [])
-            means.append(_mean(values))
-        ax.scatter(
+            means.append(_mean(values) if values else float("nan"))
+        ax.plot(
             x_positions,
             means,
-            s=90,
-            alpha=0.9,
             label=size,
-            marker=marker,
             color=color,
-            edgecolors="black" if color == "white" else "none",
-            linewidths=0.8 if color == "white" else 0.0,
+            linewidth=1.7,
+            alpha=0.75,
+            zorder=1,
         )
+        for x_pos, mean_value in zip(x_positions, means):
+            if math.isnan(mean_value):
+                continue
+            ax.text(
+                x_pos,
+                mean_value,
+                size,
+                color=color,
+                fontsize=13,
+                fontweight="bold",
+                ha="center",
+                va="center",
+                zorder=3,
+            )
 
     if anchor_centers:
         other_means = []
@@ -243,25 +258,25 @@ def _plot_metric_grid(
             else:
                 values = torch.full((stacked.shape[0],), float("nan"))
             other_means.append(float(values.mean().item()))
-        ax.scatter(
+        ax.plot(
             x_positions,
             other_means,
-            s=140,
+            linewidth=1.5,
             alpha=0.9,
             label="others_mean",
-            marker="X",
+            linestyle="--",
             color="black",
         )
 
     if anchor_self_means:
         self_means = [anchor_self_means.get(animal, {}).get(metric_key, float("nan")) for animal in used_animals]
-        ax.scatter(
+        ax.plot(
             x_positions,
             self_means,
-            s=120,
+            linewidth=1.5,
             alpha=0.9,
             label="self_mean",
-            marker="x",
+            linestyle="-.",
             color="black",
         )
 
@@ -273,28 +288,37 @@ def _plot_metric_grid(
 
     handles, labels = ax.get_legend_handles_labels()
     if handles:
+        legend_cols = max(1, (len(labels) + 1) // 2)
         fig.legend(
             handles,
             labels,
-            loc="center left",
-            bbox_to_anchor=(1.0, 0.5),
-            borderaxespad=0.0,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.99),
+            ncol=legend_cols,
             fontsize=14,
         )
 
-    fig.tight_layout(rect=[0.0, 0.0, 1.0, 1.0])
+    if handles:
+        fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.92])
+    else:
+        fig.tight_layout(rect=[0.0, 0.0, 1.0, 1.0])
     fig.savefig(out_dir, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Plot feature change metrics from size=100 center to each size for each animal.",
+        description="Plot feature change metrics from anchor center to each size for each animal.",
     )
     parser.add_argument(
         "--selected-root",
         default=str(_default_selected_root()),
         help="Structured root with size data (default: repo_root/results/selected).",
+    )
+    parser.add_argument(
+        "--composite-subdir",
+        default=COMPOSITE_SUBDIR,
+        help="Composite subdir under anchors (default: with_composite).",
     )
     parser.add_argument("--gen-model", default=None, help="Generation model (flux/qwen/sd3.5).")
     parser.add_argument("--vision-model", default=None, help="Vision encoder key (e.g., pe-core-l14-336).")
@@ -305,21 +329,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Output root for plots (default: <selected-root>/analysis/anchor_size_distance).",
     )
     parser.add_argument("--dpi", type=int, default=200, help="Figure DPI.")
+    parser.add_argument("--fig-width", type=float, default=10.0, help="Figure width in inches.")
+    parser.add_argument("--fig-height", type=float, default=11.7, help="Figure height in inches.")
     return parser
 
 
 def _run_structured(
     selected_root: Path,
+    anchors_root: Path,
     output_root: Path,
     gen_models: Sequence[str],
     vision_models: Sequence[str],
     poolings: Sequence[str],
+    composite_subdir: str,
     dpi: int,
+    fig_width: float,
+    fig_height: float,
 ) -> None:
     size_root = selected_root / "size"
-    animals = _list_animals(size_root)
+    animals = _list_animals(anchors_root)
     if not animals:
-        raise SystemExit(f"No animals found under {size_root}")
+        raise SystemExit(f"No animals found under {anchors_root}")
 
     marker_cycle = ["o", "s", "^", "D", "v", "P", "X", "*", "<", ">"]
     color_cycle = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
@@ -342,14 +372,12 @@ def _run_structured(
 
                 for animal in animals:
                     anchor_dir = (
-                        size_root
+                        anchors_root
                         / animal
-                        / "size"
                         / gen_model
                         / "features"
                         / vision
                         / pooling
-                        / "100"
                     )
                     if not anchor_dir.is_dir():
                         continue
@@ -369,7 +397,6 @@ def _run_structured(
                         size_dir = (
                             size_root
                             / animal
-                            / "size"
                             / gen_model
                             / "features"
                             / vision
@@ -408,6 +435,7 @@ def _run_structured(
                 out_dir.mkdir(parents=True, exist_ok=True)
                 summary = {
                     "selected_root": str(selected_root),
+                    "composite_subdir": composite_subdir,
                     "gen_model": gen_model,
                     "vision_model": vision,
                     "pooling": pooling,
@@ -432,6 +460,8 @@ def _run_structured(
                     out_dir=out_dir / "anchor_size_distance_grid.png",
                     title=title,
                     dpi=dpi,
+                    fig_width=fig_width,
+                    fig_height=fig_height,
                 )
                 _plot_metric_grid(
                     metric_key="norm_diff",
@@ -446,6 +476,8 @@ def _run_structured(
                     out_dir=out_dir / "anchor_size_norm_diff_grid.png",
                     title=title,
                     dpi=dpi,
+                    fig_width=fig_width,
+                    fig_height=fig_height,
                 )
                 _plot_metric_grid(
                     metric_key="cosine",
@@ -460,6 +492,8 @@ def _run_structured(
                     out_dir=out_dir / "anchor_size_cosine_grid.png",
                     title=title,
                     dpi=dpi,
+                    fig_width=fig_width,
+                    fig_height=fig_height,
                 )
                 _plot_metric_grid(
                     metric_key="relative_change",
@@ -474,6 +508,8 @@ def _run_structured(
                     out_dir=out_dir / "anchor_size_relative_change_grid.png",
                     title=title,
                     dpi=dpi,
+                    fig_width=fig_width,
+                    fig_height=fig_height,
                 )
                 LOGGER.info("Saved plot: %s", out_dir / "anchor_size_distance_grid.png")
                 LOGGER.info("Saved plot: %s", out_dir / "anchor_size_norm_diff_grid.png")
@@ -488,6 +524,15 @@ def main() -> None:
     selected_root = Path(args.selected_root).expanduser().resolve()
     if not selected_root.is_dir():
         raise SystemExit(f"Selected root not found: {selected_root}")
+    composite_subdir = str(args.composite_subdir).strip()
+    if composite_subdir not in {"with_composite", "without_composite"}:
+        raise SystemExit(
+            "Error: composite-subdir must be 'with_composite' or 'without_composite': "
+            f"{composite_subdir}"
+        )
+    anchors_root = selected_root / "anchors" / composite_subdir
+    if not anchors_root.is_dir():
+        raise SystemExit(f"Anchors root not found: {anchors_root}")
 
     output_root = (
         Path(args.output_root).expanduser().resolve()
@@ -496,11 +541,13 @@ def main() -> None:
     )
 
     size_root = selected_root / "size"
-    animals = _list_animals(size_root)
+    animals = _list_animals(anchors_root)
     if not animals:
-        raise SystemExit(f"No animals found under {size_root}")
+        raise SystemExit(f"No animals found under {anchors_root}")
+    if not size_root.is_dir():
+        raise SystemExit(f"Size root not found: {size_root}")
 
-    gen_models = [args.gen_model] if args.gen_model else _list_gen_models(size_root, animals)
+    gen_models = [args.gen_model] if args.gen_model else _list_gen_models(anchors_root, animals)
     if not gen_models:
         raise SystemExit("No generation models found.")
 
@@ -509,10 +556,10 @@ def main() -> None:
         vision_models = [args.vision_model]
     else:
         for gen_model in gen_models:
-            vision_models.extend(_list_vision_models(size_root, animals, gen_model))
+            vision_models.extend(_list_vision_models(anchors_root, animals, gen_model))
         vision_models = _ordered(sorted(set(vision_models)), DEFAULT_VISION_ORDER)
     if not vision_models:
-        raise SystemExit("No vision models found under size.")
+        raise SystemExit("No vision models found under anchors.")
 
     poolings: List[str] = []
     if args.pooling:
@@ -520,12 +567,23 @@ def main() -> None:
     else:
         for gen_model in gen_models:
             for vision in vision_models:
-                poolings.extend(_list_poolings(size_root, animals, gen_model, vision))
+                poolings.extend(_list_poolings(anchors_root, animals, gen_model, vision))
         poolings = sorted(set(poolings))
     if not poolings:
-        raise SystemExit("No pooling directories found under size.")
+        raise SystemExit("No pooling directories found under anchors.")
 
-    _run_structured(selected_root, output_root, gen_models, vision_models, poolings, args.dpi)
+    _run_structured(
+        selected_root,
+        anchors_root,
+        output_root,
+        gen_models,
+        vision_models,
+        poolings,
+        composite_subdir,
+        args.dpi,
+        args.fig_width,
+        args.fig_height,
+    )
 
 
 if __name__ == "__main__":

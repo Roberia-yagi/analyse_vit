@@ -174,7 +174,6 @@ def _plot_metric_grid(
     metric_label: str,
     distances: Dict[str, Dict[str, Dict[str, List[float]]]],
     anchor_centers: Dict[str, torch.Tensor],
-    anchor_self_means: Dict[str, Dict[str, float]],
     used_animals: List[str],
     angles_sorted: List[str],
     angle_to_marker: Dict[str, str],
@@ -182,8 +181,10 @@ def _plot_metric_grid(
     out_dir: Path,
     title: str,
     dpi: int,
+    fig_width: float,
+    fig_height: float,
 ) -> None:
-    fig, ax = plt.subplots(figsize=(10.0, 7.5))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     x_positions = list(range(len(used_animals)))
     for angle in angles_sorted:
         marker = angle_to_marker[angle]
@@ -191,15 +192,14 @@ def _plot_metric_grid(
         means = []
         for animal in used_animals:
             values = distances.get(metric_key, {}).get(angle, {}).get(animal, [])
-            means.append(_mean(values))
+            means.append(_mean(values) if values else float("nan"))
         ax.plot(
             x_positions,
             means,
             color=color,
-            linewidth=1.2,
-            alpha=0.45,
-            zorder=2,
-            label=None,
+            linewidth=1.7,
+            alpha=0.75,
+            zorder=1,
         )
         ax.scatter(
             x_positions,
@@ -209,8 +209,9 @@ def _plot_metric_grid(
             label=angle,
             marker=marker,
             color=color,
-            edgecolors="black" if angle == "front" else "none",
-            linewidths=0.8 if angle == "front" else 0.0,
+            edgecolors="black" if color == "white" else "none",
+            linewidths=0.8 if color == "white" else 0.0,
+            zorder=2,
         )
 
     if anchor_centers:
@@ -250,31 +251,9 @@ def _plot_metric_grid(
             x_positions,
             other_means,
             color="black",
-            linewidth=1.2,
-            alpha=0.45,
-            zorder=2,
-            label=None,
-        )
-
-    if anchor_self_means:
-        self_means = [anchor_self_means.get(animal, {}).get(metric_key, float("nan")) for animal in used_animals]
-        ax.scatter(
-            x_positions,
-            self_means,
-            s=120,
-            alpha=0.9,
-            label="self_mean",
-            marker="x",
-            color="black",
-        )
-        ax.plot(
-            x_positions,
-            self_means,
-            color="black",
-            linewidth=1.2,
-            alpha=0.45,
-            zorder=2,
-            label=None,
+            linewidth=1.7,
+            alpha=0.75,
+            zorder=1,
         )
 
     ax.set_xticks(x_positions)
@@ -285,16 +264,20 @@ def _plot_metric_grid(
 
     handles, labels = ax.get_legend_handles_labels()
     if handles:
+        legend_cols = max(1, (len(labels) + 1) // 2)
         fig.legend(
             handles,
             labels,
-            loc="center left",
-            bbox_to_anchor=(1.0, 0.5),
-            borderaxespad=0.0,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.99),
+            ncol=legend_cols,
             fontsize=14,
         )
 
-    fig.tight_layout(rect=[0.0, 0.0, 1.0, 1.0])
+    if handles:
+        fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.92])
+    else:
+        fig.tight_layout(rect=[0.0, 0.0, 1.0, 1.0])
     fig.savefig(out_dir, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
@@ -327,6 +310,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Output root for plots (default: <selected-root>/analysis/anchor_angle_distance).",
     )
     parser.add_argument("--dpi", type=int, default=200, help="Figure DPI.")
+    parser.add_argument("--fig-width", type=float, default=8.0, help="Figure width in inches.")
+    parser.add_argument("--fig-height", type=float, default=11.7, help="Figure height in inches.")
     return parser
 
 
@@ -338,6 +323,8 @@ def _run_structured(
     poolings: Sequence[str],
     angles: Sequence[str],
     dpi: int,
+    fig_width: float,
+    fig_height: float,
 ) -> None:
     anchors_root = selected_root / "anchors" / COMPOSITE_SUBDIR
     angles_root = selected_root / "angles" / COMPOSITE_SUBDIR
@@ -345,8 +332,13 @@ def _run_structured(
     if not animals:
         raise SystemExit(f"No animals found under {anchors_root}")
 
-    marker_cycle = ["o", "s", "^", "D", "v", "P", "X", "*", "<", ">"]
-    angle_to_marker: Dict[str, str] = {}
+    angle_to_marker: Dict[str, str] = {
+        "front": "v",
+        "back": "^",
+        "left": "<",
+        "right": ">",
+        "top": "D",
+    }
     angle_to_color: Dict[str, str] = {
         "front": "black",
         "back": "crimson",
@@ -364,7 +356,6 @@ def _run_structured(
                 "relative_change": {},
             }
             anchor_centers: Dict[str, torch.Tensor] = {}
-            anchor_self_means: Dict[str, Dict[str, float]] = {}
             used_animals: List[str] = []
             for animal in animals:
                 anchor_dir = anchors_root / animal / gen_model / "features" / vision / pooling
@@ -375,7 +366,6 @@ def _run_structured(
                 except FileNotFoundError:
                     continue
                 anchor_centers[animal] = center
-                anchor_self_means[animal] = _anchor_mean_metrics(anchor_dir, center)
 
                 added = False
                 for angle in angles:
@@ -414,9 +404,12 @@ def _run_structured(
 
             used_animals = sorted(set(used_animals))
             angles_sorted = _ordered(sorted(distances["distance"].keys()), DEFAULT_ANGLE_ORDER)
-            for angle in angles_sorted:
-                if angle not in angle_to_marker:
-                    angle_to_marker[angle] = marker_cycle[len(angle_to_marker) % len(marker_cycle)]
+            unknown_angles = [angle for angle in angles_sorted if angle not in angle_to_marker]
+            if unknown_angles:
+                raise SystemExit(
+                    "No marker mapping defined for angle(s): "
+                    + ", ".join(sorted(unknown_angles))
+                )
 
             out_dir = output_root / gen_model / vision / pooling
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -439,7 +432,6 @@ def _run_structured(
                 metric_label="L2 distance from anchor center",
                 distances=distances,
                 anchor_centers=anchor_centers,
-                anchor_self_means=anchor_self_means,
                 used_animals=used_animals,
                 angles_sorted=angles_sorted,
                 angle_to_marker=angle_to_marker,
@@ -447,13 +439,14 @@ def _run_structured(
                 out_dir=out_dir / "anchor_angle_distance_grid.png",
                 title=title,
                 dpi=dpi,
+                fig_width=fig_width,
+                fig_height=fig_height,
             )
             _plot_metric_grid(
                 metric_key="norm_diff",
                 metric_label="| ||a|| - ||b|| | (norm diff)",
                 distances=distances,
                 anchor_centers=anchor_centers,
-                anchor_self_means=anchor_self_means,
                 used_animals=used_animals,
                 angles_sorted=angles_sorted,
                 angle_to_marker=angle_to_marker,
@@ -461,13 +454,14 @@ def _run_structured(
                 out_dir=out_dir / "anchor_angle_norm_diff_grid.png",
                 title=title,
                 dpi=dpi,
+                fig_width=fig_width,
+                fig_height=fig_height,
             )
             _plot_metric_grid(
                 metric_key="cosine",
                 metric_label="cos(a, b) (angle)",
                 distances=distances,
                 anchor_centers=anchor_centers,
-                anchor_self_means=anchor_self_means,
                 used_animals=used_animals,
                 angles_sorted=angles_sorted,
                 angle_to_marker=angle_to_marker,
@@ -475,13 +469,14 @@ def _run_structured(
                 out_dir=out_dir / "anchor_angle_cosine_grid.png",
                 title=title,
                 dpi=dpi,
+                fig_width=fig_width,
+                fig_height=fig_height,
             )
             _plot_metric_grid(
                 metric_key="relative_change",
                 metric_label="||a-b|| / ||a|| (relative change)",
                 distances=distances,
                 anchor_centers=anchor_centers,
-                anchor_self_means=anchor_self_means,
                 used_animals=used_animals,
                 angles_sorted=angles_sorted,
                 angle_to_marker=angle_to_marker,
@@ -489,6 +484,8 @@ def _run_structured(
                 out_dir=out_dir / "anchor_angle_relative_change_grid.png",
                 title=title,
                 dpi=dpi,
+                fig_width=fig_width,
+                fig_height=fig_height,
             )
             LOGGER.info("Saved plot: %s", out_dir / "anchor_angle_distance_grid.png")
             LOGGER.info("Saved plot: %s", out_dir / "anchor_angle_norm_diff_grid.png")
@@ -546,7 +543,17 @@ def main() -> None:
     if not poolings:
         raise SystemExit("No pooling directories found under anchors.")
 
-    _run_structured(selected_root, output_root, GEN_MODEL, vision_models, poolings, angles, args.dpi)
+    _run_structured(
+        selected_root,
+        output_root,
+        GEN_MODEL,
+        vision_models,
+        poolings,
+        angles,
+        args.dpi,
+        args.fig_width,
+        args.fig_height,
+    )
 
 
 if __name__ == "__main__":

@@ -88,23 +88,41 @@ if [[ ! -d "$SELECTED_ROOT/angles/$COMPOSITE_SUBDIR" ]]; then
 fi
 
 OUTPUT_DIR="${OUTPUT_DIR:-}"
+GEN_MODEL="qwen"
+POOLING="attention_pooling"
+DPI=200
+FIG_WIDTH=8.0
+FIG_HEIGHT=11.7
+VISION_MODELS=(
+  "pe-core-l14-336"
+  "siglip2-giant-opt-patch16-384"
+  "qwen3-vl-8b-embed"
+)
 
 export PYTHONNOUSERSITE=1
 unset PYTHONPATH
 
-ARGS=(
+BASE_ARGS=(
   --selected-root "$SELECTED_ROOT"
+  --gen-model "$GEN_MODEL"
+  --pooling "$POOLING"
+  --dpi "$DPI"
+  --fig-width "$FIG_WIDTH"
+  --fig-height "$FIG_HEIGHT"
 )
 if [[ -n "${OUTPUT_DIR:-}" ]]; then
-  ARGS+=(--output-root "$OUTPUT_DIR")
-fi
-if [[ -n "${DPI:-}" ]]; then
-  ARGS+=(--dpi "$DPI")
+  BASE_ARGS+=(--output-root "$OUTPUT_DIR")
 fi
 if [[ -n "${PLOT_ARGS:-}" ]]; then
   read -r -a EXTRA_ARGS <<< "$PLOT_ARGS"
-  ARGS+=("${EXTRA_ARGS[@]}")
+  BASE_ARGS+=("${EXTRA_ARGS[@]}")
 fi
 
 cd "$PROJECT_ROOT"
-uv run --extra analysis-perception -- python -m analyse_vit.rare_colour_bias.plot.feature_anchor_angle_distance_plot "${ARGS[@]}"
+for VISION_MODEL in "${VISION_MODELS[@]}"; do
+  ARGS=(
+    "${BASE_ARGS[@]}"
+    --vision-model "$VISION_MODEL"
+  )
+  uv run --extra analysis-perception -- python -m analyse_vit.rare_colour_bias.plot.feature_anchor_angle_distance_plot "${ARGS[@]}"
+done

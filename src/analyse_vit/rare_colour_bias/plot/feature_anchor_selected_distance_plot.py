@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import time
-from math import atan2, pi
+from math import atan2, ceil, pi
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -443,6 +443,7 @@ def _choose_global_colours(
             rank_delta[rank].setdefault(name, []).append(delta)
 
     chosen: Dict[int, str] = {}
+    chosen_names: set[str] = set()
     stats: Dict[int, Dict[str, Dict[str, float]]] = {}
     for rank in ranks:
         if not rank_counts[rank]:
@@ -452,8 +453,22 @@ def _choose_global_colours(
             mean_delta = float(sum(rank_delta[rank].get(name, [0.0])) / len(rank_delta[rank].get(name, [1.0])))
             return (-count, mean_delta, name)
 
-        best_name = sorted(rank_counts[rank].items(), key=_key)[0][0]
+        sorted_candidates = sorted(rank_counts[rank].items(), key=_key)
+        best_name: Optional[str] = None
+        for name, _ in sorted_candidates:
+            if name not in chosen_names:
+                best_name = name
+                break
+        if best_name is None:
+            best_name = sorted_candidates[0][0]
+            LOGGER.warning(
+                "Colour overlap unavoidable for rank=%d (gen_model=%s); reusing '%s'.",
+                rank,
+                gen_model,
+                best_name,
+            )
         chosen[rank] = best_name
+        chosen_names.add(best_name)
         stats[rank] = {}
         for name, count in rank_counts[rank].items():
             mean_delta = float(sum(rank_delta[rank].get(name, [0.0])) / len(rank_delta[rank].get(name, [1.0])))
@@ -469,11 +484,19 @@ def _plot_all_series(
     animals: List[str],
     series: Sequence[Tuple[str, Sequence[float], str, str]],
     dpi: int,
+    fig_width: float,
+    fig_height: float,
 ) -> None:
-    fig, ax = plt.subplots(figsize=(12.0, 8.5))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    angle_marker_map: Dict[str, str] = {
+        "front": "v",
+        "back": "^",
+        "left": "<",
+        "right": ">",
+        "top": "D",
+    }
     x_positions = list(range(len(animals)))
     for label, values, marker, color in series:
-        edge_kwargs: Dict[str, float | str] = {}
         try:
             rgba = mcolors.to_rgba(color)
         except ValueError as exc:
@@ -481,50 +504,91 @@ def _plot_all_series(
                 f"Error: plot color '{color}' is not a valid Matplotlib color name or hex."
             ) from exc
         line_color = color
+        edge_color = "none"
+        edge_width = 0.0
         if rgba[:3] == (1.0, 1.0, 1.0):
-            edge_kwargs = {"edgecolor": "black", "linewidth": 1.2}
+            edge_color = "black"
+            edge_width = 0.8
             line_color = "black"
+        line_label = label if label.startswith("size=") else None
         ax.plot(
             x_positions,
             values,
             color=line_color,
-            linewidth=1.2,
-            alpha=0.45,
-            zorder=2,
-            label=None,
+            linewidth=1.7,
+            alpha=0.75,
+            zorder=1,
+            label=line_label,
         )
-        ax.scatter(x_positions, values, s=85, alpha=0.9, label=label, marker=marker, color=color)
-        if edge_kwargs:
-            ax.scatter(
-                x_positions,
-                values,
-                s=85,
-                alpha=0.9,
-                label=None,
-                marker=marker,
-                color=color,
-                **edge_kwargs,
-            )
+
+        if label.startswith("size="):
+            size_text = label.split("=", 1)[1]
+            for x_pos, value in zip(x_positions, values):
+                if np.isnan(value):
+                    continue
+                ax.text(
+                    x_pos,
+                    value,
+                    size_text,
+                    color=line_color,
+                    fontsize=13,
+                    fontweight="bold",
+                    ha="center",
+                    va="center",
+                    zorder=3,
+                )
+            continue
+
+        marker_to_use = marker
+        if label.startswith("angle="):
+            angle_name = label.split("=", 1)[1]
+            if angle_name not in angle_marker_map:
+                raise SystemExit(f"Error: unknown angle marker mapping for '{angle_name}'.")
+            marker_to_use = angle_marker_map[angle_name]
+        elif not label.startswith("self_mean") and not label.startswith("others_mean"):
+            marker_to_use = "o"
+
+        scatter_kwargs: Dict[str, object] = {
+            "s": 90,
+            "alpha": 0.9,
+            "label": label,
+            "marker": marker_to_use,
+            "color": color,
+            "zorder": 2,
+        }
+        if edge_width > 0.0:
+            scatter_kwargs["edgecolors"] = edge_color
+            scatter_kwargs["linewidths"] = edge_width
+        ax.scatter(x_positions, values, **scatter_kwargs)
 
     ax.set_xticks(x_positions)
-    ax.set_xticklabels(animals, rotation=45, ha="right", fontsize=15)
-    ax.set_ylabel(ylabel, fontsize=16)
-    ax.tick_params(axis="y", labelsize=15)
+    ax.set_xticklabels(animals, rotation=45, ha="right", fontsize=16)
+    ax.set_ylabel(ylabel, fontsize=17)
+    ax.tick_params(axis="y", labelsize=16)
     ax.set_title(title, fontsize=18)
 
     handles, labels = ax.get_legend_handles_labels()
     if handles:
+        # Keep legend at 4 rows to avoid horizontal overflow.
+        legend_cols = max(1, ceil(len(labels) / 4))
+        legend_rows = max(1, ceil(len(labels) / legend_cols))
         fig.legend(
             handles,
             labels,
-            loc="center left",
-            bbox_to_anchor=(1.0, 0.5),
-            borderaxespad=0.0,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.985),
             fontsize=12,
-            ncol=2,
+            ncol=legend_cols,
+            columnspacing=1.0,
+            handletextpad=0.4,
+            labelspacing=0.3,
         )
 
-    fig.tight_layout(rect=[0.0, 0.0, 1.0, 1.0])
+    if handles:
+        legend_top = max(0.86, 0.995 - 0.03 * legend_rows)
+        fig.tight_layout(rect=[0.0, 0.0, 1.0, legend_top])
+    else:
+        fig.tight_layout(rect=[0.0, 0.0, 1.0, 1.0])
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
@@ -545,25 +609,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--gen-model", default=None, help="Generation model (flux/qwen/sd3.5).")
     parser.add_argument("--vision-model", default=None, help="Vision encoder key (e.g., pe-core-l14-336).")
-    parser.add_argument("--pooling", default=None, help="Pooling/embedding key (e.g., attention_pooling).")
+    parser.add_argument("--pooling", default="attention_pooling", help="Pooling/embedding key (default: attention_pooling).")
     parser.add_argument(
         "--size-values",
-        nargs=2,
-        default=("30", "60"),
-        help="Two size buckets to plot (default: 30 60).",
+        nargs="+",
+        default=("30", "50", "70", "90"),
+        help="Size buckets to plot (default: 30 50 70 90).",
     )
     parser.add_argument(
         "--angles",
-        nargs=2,
-        default=("back", "left"),
-        help="Two angles to plot (default: back left).",
+        nargs="+",
+        default=("back", "left", "right", "top"),
+        help="Angles to plot (default: back left right top).",
     )
     parser.add_argument(
         "--colour-ranks",
-        nargs=2,
+        nargs="+",
         type=int,
-        default=(5, 10),
-        help="Two colour ranks to select by hue distance (default: 5 10).",
+        default=(2, 5, 10, 11),
+        help="Colour ranks to select by hue distance (default: 2 5 10 11).",
     )
     parser.add_argument(
         "--output-root",
@@ -571,6 +635,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Output root for plots (default: <selected-root>/analysis/anchor_selected_distance).",
     )
     parser.add_argument("--dpi", type=int, default=200, help="Figure DPI.")
+    parser.add_argument("--fig-width", type=float, default=8.0, help="Figure width in inches.")
+    parser.add_argument("--fig-height", type=float, default=11.7, help="Figure height in inches.")
     return parser
 
 
@@ -584,6 +650,8 @@ def _run_structured(
     angles: Sequence[str],
     colour_ranks: Sequence[int],
     dpi: int,
+    fig_width: float,
+    fig_height: float,
 ) -> None:
     overall_start = time.perf_counter()
     anchors_root = selected_root / "anchors" / COMPOSITE_SUBDIR
@@ -622,9 +690,9 @@ def _run_structured(
         for vision in vision_models:
             for pooling in poolings:
                 loop_start = time.perf_counter()
-                size_values: Dict[str, Tuple[float, float]] = {}
-                angle_values: Dict[str, Tuple[float, float]] = {}
-                colour_values: Dict[str, Tuple[float, float]] = {}
+                size_values: Dict[str, Dict[str, float]] = {}
+                angle_values: Dict[str, Dict[str, float]] = {}
+                colour_values: Dict[str, Dict[int, float]] = {}
                 anchor_centers: Dict[str, torch.Tensor] = {}
                 anchor_self_means: Dict[str, float] = {}
 
@@ -648,80 +716,91 @@ def _run_structured(
                     if self_mean is not None:
                         anchor_self_means[animal] = self_mean
 
-                    size_dir_a = size_root / animal / gen_model / "features" / vision / pooling / sizes[0]
-                    size_dir_b = size_root / animal / gen_model / "features" / vision / pooling / sizes[1]
-                    if size_dir_a.is_dir() and size_dir_b.is_dir():
-                        size_mean_a = mean_distance_cache.get(size_dir_a)
-                        if size_mean_a is None and size_dir_a not in mean_distance_cache:
-                            size_mean_a = _mean_distance(size_dir_a, center)
-                            mean_distance_cache[size_dir_a] = size_mean_a
-                        size_mean_b = mean_distance_cache.get(size_dir_b)
-                        if size_mean_b is None and size_dir_b not in mean_distance_cache:
-                            size_mean_b = _mean_distance(size_dir_b, center)
-                            mean_distance_cache[size_dir_b] = size_mean_b
-                        if size_mean_a is not None and size_mean_b is not None:
-                            size_values[animal] = (size_mean_a, size_mean_b)
-                        else:
-                            LOGGER.warning("No size features for %s", animal)
-                    else:
-                        LOGGER.warning("Missing size dirs for %s (%s/%s)", animal, sizes[0], sizes[1])
+                    size_for_animal: Dict[str, float] = {}
+                    missing_sizes: List[str] = []
+                    for size in sizes:
+                        size_dir = size_root / animal / gen_model / "features" / vision / pooling / size
+                        if not size_dir.is_dir():
+                            missing_sizes.append(size)
+                            continue
+                        size_mean = mean_distance_cache.get(size_dir)
+                        if size_mean is None and size_dir not in mean_distance_cache:
+                            size_mean = _mean_distance(size_dir, center)
+                            mean_distance_cache[size_dir] = size_mean
+                        if size_mean is None:
+                            missing_sizes.append(size)
+                            continue
+                        size_for_animal[size] = size_mean
+                    if missing_sizes:
+                        LOGGER.warning(
+                            "Missing size features for %s (%s)",
+                            animal,
+                            ", ".join(missing_sizes),
+                        )
+                    if len(size_for_animal) == len(sizes):
+                        size_values[animal] = size_for_animal
 
-                    angle_dir_a = (
-                        angles_root / animal / angles[0] / gen_model / "features" / vision / pooling
-                    )
-                    angle_dir_b = (
-                        angles_root / animal / angles[1] / gen_model / "features" / vision / pooling
-                    )
-                    if angle_dir_a.is_dir() and angle_dir_b.is_dir():
-                        angle_mean_a = mean_distance_cache.get(angle_dir_a)
-                        if angle_mean_a is None and angle_dir_a not in mean_distance_cache:
-                            angle_mean_a = _mean_distance(angle_dir_a, center)
-                            mean_distance_cache[angle_dir_a] = angle_mean_a
-                        angle_mean_b = mean_distance_cache.get(angle_dir_b)
-                        if angle_mean_b is None and angle_dir_b not in mean_distance_cache:
-                            angle_mean_b = _mean_distance(angle_dir_b, center)
-                            mean_distance_cache[angle_dir_b] = angle_mean_b
-                        if angle_mean_a is not None and angle_mean_b is not None:
-                            angle_values[animal] = (angle_mean_a, angle_mean_b)
-                        else:
-                            LOGGER.warning("No angle features for %s", animal)
-                    else:
-                        LOGGER.warning("Missing angle dirs for %s (%s/%s)", animal, angles[0], angles[1])
+                    angle_for_animal: Dict[str, float] = {}
+                    missing_angles: List[str] = []
+                    for angle in angles:
+                        angle_dir = (
+                            anchor_dir
+                            if angle == "front"
+                            else angles_root / animal / angle / gen_model / "features" / vision / pooling
+                        )
+                        if not angle_dir.is_dir():
+                            missing_angles.append(angle)
+                            continue
+                        angle_mean = mean_distance_cache.get(angle_dir)
+                        if angle_mean is None and angle_dir not in mean_distance_cache:
+                            angle_mean = _mean_distance(angle_dir, center)
+                            mean_distance_cache[angle_dir] = angle_mean
+                        if angle_mean is None:
+                            missing_angles.append(angle)
+                            continue
+                        angle_for_animal[angle] = angle_mean
+                    if missing_angles:
+                        LOGGER.warning(
+                            "Missing angle features for %s (%s)",
+                            animal,
+                            ", ".join(missing_angles),
+                        )
+                    if len(angle_for_animal) == len(angles):
+                        angle_values[animal] = angle_for_animal
 
                     if (colour_root / animal).is_dir():
-                        colour_dir_a = (
-                            colour_root
-                            / animal
-                            / str(global_colour_names[colour_ranks[0]])
-                            / gen_model
-                            / "features"
-                            / vision
-                            / pooling
-                        )
-                        colour_dir_b = (
-                            colour_root
-                            / animal
-                            / str(global_colour_names[colour_ranks[1]])
-                            / gen_model
-                            / "features"
-                            / vision
-                            / pooling
-                        )
-                        if colour_dir_a.is_dir() and colour_dir_b.is_dir():
-                            colour_mean_a = mean_distance_cache.get(colour_dir_a)
-                            if colour_mean_a is None and colour_dir_a not in mean_distance_cache:
-                                colour_mean_a = _mean_distance(colour_dir_a, center)
-                                mean_distance_cache[colour_dir_a] = colour_mean_a
-                            colour_mean_b = mean_distance_cache.get(colour_dir_b)
-                            if colour_mean_b is None and colour_dir_b not in mean_distance_cache:
-                                colour_mean_b = _mean_distance(colour_dir_b, center)
-                                mean_distance_cache[colour_dir_b] = colour_mean_b
-                            if colour_mean_a is not None and colour_mean_b is not None:
-                                colour_values[animal] = (colour_mean_a, colour_mean_b)
-                            else:
-                                LOGGER.warning("No colour features for %s", animal)
-                        else:
-                            LOGGER.warning("Missing colour features for %s", animal)
+                        colour_for_animal: Dict[int, float] = {}
+                        missing_colours: List[str] = []
+                        for rank in colour_ranks:
+                            colour_name = str(global_colour_names[rank])
+                            colour_dir = (
+                                colour_root
+                                / animal
+                                / colour_name
+                                / gen_model
+                                / "features"
+                                / vision
+                                / pooling
+                            )
+                            if not colour_dir.is_dir():
+                                missing_colours.append(f"{colour_name}(rank={rank})")
+                                continue
+                            colour_mean = mean_distance_cache.get(colour_dir)
+                            if colour_mean is None and colour_dir not in mean_distance_cache:
+                                colour_mean = _mean_distance(colour_dir, center)
+                                mean_distance_cache[colour_dir] = colour_mean
+                            if colour_mean is None:
+                                missing_colours.append(f"{colour_name}(rank={rank})")
+                                continue
+                            colour_for_animal[rank] = colour_mean
+                        if missing_colours:
+                            LOGGER.warning(
+                                "Missing colour features for %s (%s)",
+                                animal,
+                                ", ".join(missing_colours),
+                            )
+                        if len(colour_for_animal) == len(colour_ranks):
+                            colour_values[animal] = colour_for_animal
                     else:
                         LOGGER.warning("Missing colour root for %s", animal)
 
@@ -778,16 +857,72 @@ def _run_structured(
                 )
 
                 title = f"{gen_model} | {vision} | {pooling}"
-                series = [
-                    (f"size={sizes[0]}", [size_values[a][0] for a in common_animals], "o", "#1f77b4"),
-                    (f"size={sizes[1]}", [size_values[a][1] for a in common_animals], "s", "#ff7f0e"),
-                    (f"angle={angles[0]}", [angle_values[a][0] for a in common_animals], "D", "#2ca02c"),
-                    (f"angle={angles[1]}", [angle_values[a][1] for a in common_animals], "^", "#d62728"),
-                    (str(global_colour_names[colour_ranks[0]]), [colour_values[a][0] for a in common_animals], "v", str(global_colour_names[colour_ranks[0]])),
-                    (str(global_colour_names[colour_ranks[1]]), [colour_values[a][1] for a in common_animals], "P", str(global_colour_names[colour_ranks[1]])),
-                    ("self_mean", [anchor_self_means.get(a, float("nan")) for a in common_animals], "x", "black"),
-                    ("others_mean", [other_means.get(a, float("nan")) for a in common_animals], "X", "black"),
+                size_palette = [
+                    "#1f77b4",
+                    "#ff7f0e",
+                    "#9467bd",
+                    "#17becf",
+                    "#8c564b",
+                    "#bcbd22",
                 ]
+                angle_to_color: Dict[str, str] = {
+                    "front": "black",
+                    "back": "crimson",
+                    "left": "royalblue",
+                    "right": "seagreen",
+                    "top": "darkorange",
+                }
+                angle_palette = [
+                    "#2ca02c",
+                    "#d62728",
+                    "#7f7f7f",
+                    "#e377c2",
+                    "#aec7e8",
+                ]
+                colour_name_counts: Dict[str, int] = {}
+                for rank in colour_ranks:
+                    name = str(global_colour_names[rank])
+                    colour_name_counts[name] = colour_name_counts.get(name, 0) + 1
+                series: List[Tuple[str, Sequence[float], str, str]] = []
+                for idx, size in enumerate(sizes):
+                    size_color = size_palette[idx % len(size_palette)]
+                    series.append(
+                        (
+                            f"size={size}",
+                            [size_values[a][size] for a in common_animals],
+                            "o",
+                            size_color,
+                        )
+                    )
+                for idx, angle in enumerate(angles):
+                    angle_color = angle_to_color.get(angle, angle_palette[idx % len(angle_palette)])
+                    series.append(
+                        (
+                            f"angle={angle}",
+                            [angle_values[a][angle] for a in common_animals],
+                            "D",
+                            angle_color,
+                        )
+                    )
+                for rank in colour_ranks:
+                    colour_name = str(global_colour_names[rank])
+                    label = colour_name
+                    if colour_name_counts.get(colour_name, 0) > 1:
+                        label = f"{colour_name} (rank={rank})"
+                    series.append(
+                        (
+                            label,
+                            [colour_values[a][rank] for a in common_animals],
+                            "o",
+                            colour_name,
+                        )
+                    )
+                series.extend(
+                    [
+                        ("self_mean", [anchor_self_means.get(a, float("nan")) for a in common_animals], "x", "black"),
+                        ("others_mean", [other_means.get(a, float("nan")) for a in common_animals], "X", "black"),
+                    ]
+                )
                 _plot_all_series(
                     out_path=out_dir / "anchor_selected_distance_all.png",
                     title=title,
@@ -795,6 +930,8 @@ def _run_structured(
                     animals=common_animals,
                     series=series,
                     dpi=dpi,
+                    fig_width=fig_width,
+                    fig_height=fig_height,
                 )
                 LOGGER.info("Saved plot: %s", out_dir / "anchor_selected_distance_all.png")
                 LOGGER.info(
@@ -863,16 +1000,22 @@ def main() -> None:
         raise SystemExit("No pooling directories found under anchors.")
 
     sizes = list(args.size_values)
-    if len(sizes) != 2:
-        raise SystemExit("size-values must provide exactly 2 entries.")
+    if len(sizes) < 2:
+        raise SystemExit("size-values must provide at least 2 entries.")
+    if len(set(sizes)) != len(sizes):
+        raise SystemExit("size-values must not contain duplicates.")
 
     angles = list(args.angles)
-    if len(angles) != 2:
-        raise SystemExit("angles must provide exactly 2 entries.")
+    if len(angles) < 2:
+        raise SystemExit("angles must provide at least 2 entries.")
+    if len(set(angles)) != len(angles):
+        raise SystemExit("angles must not contain duplicates.")
 
     colour_ranks = list(args.colour_ranks)
-    if len(colour_ranks) != 2:
-        raise SystemExit("colour-ranks must provide exactly 2 entries.")
+    if len(colour_ranks) < 2:
+        raise SystemExit("colour-ranks must provide at least 2 entries.")
+    if len(set(colour_ranks)) != len(colour_ranks):
+        raise SystemExit("colour-ranks must not contain duplicates.")
     if min(colour_ranks) < 1:
         raise SystemExit("colour-ranks must be >= 1.")
 
@@ -886,6 +1029,8 @@ def main() -> None:
         angles,
         colour_ranks,
         args.dpi,
+        args.fig_width,
+        args.fig_height,
     )
 
 

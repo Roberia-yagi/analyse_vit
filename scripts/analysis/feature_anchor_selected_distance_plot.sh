@@ -57,9 +57,24 @@ notify_exit() {
 trap notify_exit EXIT
 # ------------------------------
 PROJECT_ROOT="${PWD}"
-DEFAULT_RESULTS_DIR="/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit/results/selected"
-RESULTS_DIR="${RESULTS_DIR:-$DEFAULT_RESULTS_DIR}"
-if [[ "$RESULTS_DIR" != /* ]]; then
+
+# ------------------------------
+# User-configurable values
+RESULTS_DIR="/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit/results/selected"
+OUTPUT_DIR=""
+COMPOSITE_SUBDIR="with_composite"
+GEN_MODEL="qwen"
+VISION_MODEL=""
+POOLING="attention_pooling"
+SIZE_VALUES=("30" "50" "70" "90")
+ANGLES=("back" "left" "right" "top")
+COLOUR_RANKS=("2" "5" "10" "11")
+DPI=200
+FIG_WIDTH=8.0
+FIG_HEIGHT=11.7
+# ------------------------------
+
+if [[ -z "$RESULTS_DIR" || "$RESULTS_DIR" != /* ]]; then
   echo "Error: RESULTS_DIR must be an absolute path: $RESULTS_DIR (absolute path required)" >&2
   exit 1
 fi
@@ -67,17 +82,12 @@ if [[ ! -d "$RESULTS_DIR" ]]; then
   echo "Error: RESULTS_DIR not found (absolute path required): $RESULTS_DIR" >&2
   exit 1
 fi
-
-if [[ "$RESULTS_DIR" == */selected ]]; then
-  SELECTED_ROOT="$RESULTS_DIR"
-else
-  SELECTED_ROOT="$RESULTS_DIR/selected"
-fi
-if [[ ! -d "$SELECTED_ROOT" ]]; then
-  echo "Error: selected root not found: $SELECTED_ROOT" >&2
+if [[ "$(basename "$RESULTS_DIR")" != "selected" ]]; then
+  echo "Error: RESULTS_DIR must point to the selected directory with an absolute path: $RESULTS_DIR (absolute path required)" >&2
   exit 1
 fi
-COMPOSITE_SUBDIR="with_composite"
+SELECTED_ROOT="$RESULTS_DIR"
+
 if [[ ! -d "$SELECTED_ROOT/anchors/$COMPOSITE_SUBDIR" ]]; then
   echo "Error: anchors root not found: $SELECTED_ROOT/anchors/$COMPOSITE_SUBDIR" >&2
   exit 1
@@ -91,42 +101,28 @@ if [[ ! -d "$SELECTED_ROOT/colour/$COMPOSITE_SUBDIR" && ! -d "$SELECTED_ROOT/col
   exit 1
 fi
 
-OUTPUT_DIR="${OUTPUT_DIR:-}"
-GEN_MODEL="${GEN_MODEL:-qwen}"
-
 export PYTHONNOUSERSITE=1
 unset PYTHONPATH
 
 ARGS=(
   --selected-root "$SELECTED_ROOT"
   --composite-subdir "$COMPOSITE_SUBDIR"
+  --dpi "$DPI"
+  --fig-width "$FIG_WIDTH"
+  --fig-height "$FIG_HEIGHT"
+  --pooling "$POOLING"
+  --size-values "${SIZE_VALUES[@]}"
+  --angles "${ANGLES[@]}"
+  --colour-ranks "${COLOUR_RANKS[@]}"
 )
 if [[ -n "${OUTPUT_DIR:-}" ]]; then
   ARGS+=(--output-root "$OUTPUT_DIR")
-fi
-if [[ -n "${DPI:-}" ]]; then
-  ARGS+=(--dpi "$DPI")
-fi
-if [[ -n "${SIZE_VALUES:-}" ]]; then
-  read -r -a EXTRA_ARGS <<< "$SIZE_VALUES"
-  ARGS+=(--size-values "${EXTRA_ARGS[@]}")
-fi
-if [[ -n "${ANGLES:-}" ]]; then
-  read -r -a EXTRA_ARGS <<< "$ANGLES"
-  ARGS+=(--angles "${EXTRA_ARGS[@]}")
-fi
-if [[ -n "${COLOUR_RANKS:-}" ]]; then
-  read -r -a EXTRA_ARGS <<< "$COLOUR_RANKS"
-  ARGS+=(--colour-ranks "${EXTRA_ARGS[@]}")
 fi
 if [[ -n "${GEN_MODEL:-}" ]]; then
   ARGS+=(--gen-model "$GEN_MODEL")
 fi
 if [[ -n "${VISION_MODEL:-}" ]]; then
   ARGS+=(--vision-model "$VISION_MODEL")
-fi
-if [[ -n "${POOLING:-}" ]]; then
-  ARGS+=(--pooling "$POOLING")
 fi
 
 cd "$PROJECT_ROOT"

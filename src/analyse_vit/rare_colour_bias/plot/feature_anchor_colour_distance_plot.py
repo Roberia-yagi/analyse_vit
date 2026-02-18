@@ -295,16 +295,20 @@ def _plot_metric_grid(
 
     handles, labels = ax.get_legend_handles_labels()
     if handles:
+        legend_cols = max(1, (len(labels) + 1) // 2)
         fig.legend(
             handles,
             labels,
-            loc="center left",
-            bbox_to_anchor=(1.0, 0.5),
-            borderaxespad=0.0,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.99),
+            ncol=legend_cols,
             fontsize=14,
         )
 
-    fig.tight_layout(rect=[0.0, 0.0, 1.0, 1.0])
+    if handles:
+        fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.92])
+    else:
+        fig.tight_layout(rect=[0.0, 0.0, 1.0, 1.0])
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
@@ -335,8 +339,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Output root for plots (default: <selected-root>/analysis/anchor_colour_distance).",
     )
     parser.add_argument("--dpi", type=int, default=200, help="Figure DPI.")
-    parser.add_argument("--fig-width", type=float, default=15.0, help="Figure width in inches.")
-    parser.add_argument("--fig-height", type=float, default=9.5, help="Figure height in inches.")
+    parser.add_argument("--fig-width", type=float, default=10.0, help="Figure width in inches.")
+    parser.add_argument("--fig-height", type=float, default=11.7, help="Figure height in inches.")
     return parser
 
 
@@ -452,9 +456,7 @@ def _run_structured(
                 title = f"{gen_model} | {vision} | {pooling}"
                 metric_specs = [
                     ("distance", "L2 distance from anchor center", "anchor_colour_distance_grid"),
-                    ("norm_diff", "| ||a|| - ||b|| | (norm diff)", "anchor_colour_norm_diff_grid"),
-                    ("cosine", "cos(a, b) (angle)", "anchor_colour_cosine_grid"),
-                    ("relative_change", "||a-b|| / ||a|| (relative change)", "anchor_colour_relative_change_grid"),
+                    ("cosine", "cosine similarity", "anchor_colour_cosine_grid"),
                 ]
                 total_parts = len(colour_groups)
                 for metric_key, metric_label, filename_stem in metric_specs:
