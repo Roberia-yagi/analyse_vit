@@ -313,7 +313,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument(
         "--selected-root",
         default=None,
-        help="Root directory that contains anchors/without_composite, masks, and background.",
+        help="Root directory that contains anchors, masks/anchors, and background.",
     )
     parser.add_argument("--anchors-root", default=None)
     parser.add_argument("--masks-root", default=None)
@@ -354,7 +354,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         if args.anchors_root
         else selected_root / "anchors" / "without_composite"
     )
-    masks_root = _resolve_path(args.masks_root) if args.masks_root else selected_root / "masks"
+    masks_root = _resolve_path(args.masks_root) if args.masks_root else selected_root / "masks" / "anchors"
     background_root = _resolve_path(args.background_root) if args.background_root else selected_root / "background"
     output_root = _resolve_path(args.output_root) if args.output_root else selected_root / "size"
 

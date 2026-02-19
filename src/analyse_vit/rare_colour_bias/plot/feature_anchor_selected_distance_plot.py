@@ -120,9 +120,21 @@ def _resolve_colour_root(selected_root: Path) -> Path:
     )
 
 
-def _iter_anchor_image_mask_pairs(anchors_root: Path, animal: str, gen_model: str) -> Iterable[Tuple[Path, Path]]:
+def _resolve_anchor_masks_root(selected_root: Path) -> Path:
+    masks_root = selected_root / "masks" / "anchors"
+    if not masks_root.is_dir():
+        raise SystemExit(f"Error: anchor masks root not found: {masks_root}")
+    return masks_root
+
+
+def _iter_anchor_image_mask_pairs(
+    anchors_root: Path,
+    anchor_masks_root: Path,
+    animal: str,
+    gen_model: str,
+) -> Iterable[Tuple[Path, Path]]:
     images_dir = anchors_root / animal / gen_model / "images"
-    masks_dir = anchors_root / animal / gen_model / "masks"
+    masks_dir = anchor_masks_root / animal / gen_model
     if not images_dir.is_dir():
         raise SystemExit(f"Error: anchor images dir not found: {images_dir}")
     if not masks_dir.is_dir():
@@ -308,10 +320,10 @@ def _parallel_masked_lab_means(pairs: Sequence[Tuple[Path, Path]]) -> List[Tuple
         return list(executor.map(_masked_lab_mean_from_pair, pairs))
 
 
-def _anchor_lab_mean(anchors_root: Path, animal: str, gen_model: str) -> np.ndarray:
+def _anchor_lab_mean(anchors_root: Path, anchor_masks_root: Path, animal: str, gen_model: str) -> np.ndarray:
     total = 0
     lab_sum = np.zeros(3, dtype=np.float64)
-    pairs = list(_iter_anchor_image_mask_pairs(anchors_root, animal, gen_model))
+    pairs = list(_iter_anchor_image_mask_pairs(anchors_root, anchor_masks_root, animal, gen_model))
     for (image_path, _), (lab, count) in zip(pairs, _parallel_masked_lab_means(pairs), strict=True):
         if count == 0:
             LOGGER.warning("Empty mask for %s", image_path.name)
@@ -343,6 +355,7 @@ def _pick_colour_ranks(
     *,
     selected_root: Path,
     anchors_root: Path,
+    anchor_masks_root: Path,
     animal: str,
     gen_model: str,
     ranks: Sequence[int],
@@ -350,6 +363,7 @@ def _pick_colour_ranks(
     candidates = _colour_candidates(
         selected_root=selected_root,
         anchors_root=anchors_root,
+        anchor_masks_root=anchor_masks_root,
         animal=animal,
         gen_model=gen_model,
         cache=None,
@@ -375,6 +389,7 @@ def _colour_candidates(
     *,
     selected_root: Path,
     anchors_root: Path,
+    anchor_masks_root: Path,
     animal: str,
     gen_model: str,
     cache: Optional[Dict[Tuple[str, str], List[Tuple[float, str]]]],
@@ -388,8 +403,8 @@ def _colour_candidates(
     if not animal_root.is_dir():
         raise SystemExit(f"Error: colour root not found for animal: {animal_root}")
 
-    anchor_lab = _anchor_lab_mean(anchors_root, animal, gen_model)
-    masks_dir = anchors_root / animal / gen_model / "masks"
+    anchor_lab = _anchor_lab_mean(anchors_root, anchor_masks_root, animal, gen_model)
+    masks_dir = anchor_masks_root / animal / gen_model
     candidates: List[Tuple[float, str]] = []
     for colour_dir in sorted([p for p in animal_root.iterdir() if p.is_dir()]):
         colour_name = colour_dir.name
@@ -414,6 +429,7 @@ def _choose_global_colours(
     *,
     selected_root: Path,
     anchors_root: Path,
+    anchor_masks_root: Path,
     animals: Sequence[str],
     gen_model: str,
     ranks: Sequence[int],
@@ -428,6 +444,7 @@ def _choose_global_colours(
         candidates = _colour_candidates(
             selected_root=selected_root,
             anchors_root=anchors_root,
+            anchor_masks_root=anchor_masks_root,
             animal=animal,
             gen_model=gen_model,
             cache=cache,
@@ -655,6 +672,7 @@ def _run_structured(
 ) -> None:
     overall_start = time.perf_counter()
     anchors_root = selected_root / "anchors" / COMPOSITE_SUBDIR
+    anchor_masks_root = _resolve_anchor_masks_root(selected_root)
     angles_root = selected_root / "angles" / COMPOSITE_SUBDIR
     size_root = selected_root / "size"
     colour_root = _resolve_colour_root(selected_root)
@@ -681,6 +699,7 @@ def _run_structured(
             global_colour_cache[global_cache_key] = _choose_global_colours(
                 selected_root=selected_root,
                 anchors_root=anchors_root,
+                anchor_masks_root=anchor_masks_root,
                 animals=animals,
                 gen_model=gen_model,
                 ranks=colour_ranks,

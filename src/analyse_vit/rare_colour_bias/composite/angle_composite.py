@@ -22,6 +22,7 @@ class AngleCompositeConfig:
     selected_root: Path
     angles_root: Path
     output_root: Path
+    masks_root: Path
     background_root: Path
     animals: Optional[Sequence[str]]
     angles: Optional[Sequence[str]]
@@ -76,6 +77,11 @@ def _parse_args(argv: Optional[list[str]] = None) -> AngleCompositeConfig:
         help="Output root for composites (default: selected_root/angles/with_composite).",
     )
     parser.add_argument(
+        "--masks-root",
+        default=None,
+        help="Output root for masks (default: selected_root/masks/angles).",
+    )
+    parser.add_argument(
         "--background-root",
         default=None,
         help="Background root (default: selected_root/background).",
@@ -121,6 +127,7 @@ def _parse_args(argv: Optional[list[str]] = None) -> AngleCompositeConfig:
 
     angles_root = _resolve_path(args.angles_root) if args.angles_root else selected_root / "angles" / "without_composite"
     output_root = _resolve_path(args.output_root) if args.output_root else selected_root / "angles" / "with_composite"
+    masks_root = _resolve_path(args.masks_root) if args.masks_root else selected_root / "masks" / "angles"
     background_root = _resolve_path(args.background_root) if args.background_root else selected_root / "background"
 
     if not angles_root.is_dir():
@@ -136,6 +143,7 @@ def _parse_args(argv: Optional[list[str]] = None) -> AngleCompositeConfig:
         selected_root=selected_root,
         angles_root=angles_root,
         output_root=output_root,
+        masks_root=masks_root,
         background_root=background_root,
         animals=_parse_list(args.animals),
         angles=_parse_list(args.angles),
@@ -236,7 +244,7 @@ def _run_angle_composite(
     prompt_name = animal if config.object_name == "auto" else config.object_name
 
     run_id = _extract_run_id(image_path)
-    masks_root = config.angles_root / animal / angle / model / "masks"
+    masks_root = config.masks_root / animal / angle / model
     masks_root.mkdir(parents=True, exist_ok=True)
 
     mask_path = masks_root / f"mask_run_{run_id}.png"

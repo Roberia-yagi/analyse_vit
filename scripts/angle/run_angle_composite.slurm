@@ -67,7 +67,12 @@ PROJECT_ROOT="${PWD}"
 
 RESULTS_DIR="/home/akasakam/projects/spatial_reasoning/projects/image_editing/experiments/analyse_vit/results"
 SELECTED_ROOT="$RESULTS_DIR/selected"
+ANGLES_COMPOSITE_SUBDIR="without_composite"
+OUTPUT_COMPOSITE_SUBDIR="with_composite"
 OBJECT_NAME="auto"
+ANGLES_ROOT="$SELECTED_ROOT/angles/$ANGLES_COMPOSITE_SUBDIR"
+OUTPUT_ROOT="$SELECTED_ROOT/angles/$OUTPUT_COMPOSITE_SUBDIR"
+MASKS_ROOT="$SELECTED_ROOT/masks/angles"
 
 CACHE_ROOT="$PROJECT_ROOT/.cache"
 HF_CACHE_ROOT="$PROJECT_ROOT/.hf_cache"
@@ -87,6 +92,10 @@ if [[ ! -d "$SELECTED_ROOT" ]]; then
   echo "Error: selected directory not found (absolute path required): $SELECTED_ROOT" >&2
   exit 1
 fi
+if [[ ! -d "$ANGLES_ROOT" ]]; then
+  echo "Error: angles root not found: $ANGLES_ROOT" >&2
+  exit 1
+fi
 
 cd "$PROJECT_ROOT"
 export PYTHONUNBUFFERED=1
@@ -94,5 +103,8 @@ unset UV_EXTRAS UV_ALL_EXTRAS
 
 uv run --extra generate -- python -m analyse_vit.rare_colour_bias.composite.angle_composite \
   --selected-root "$SELECTED_ROOT" \
+  --angles-root "$ANGLES_ROOT" \
+  --output-root "$OUTPUT_ROOT" \
+  --masks-root "$MASKS_ROOT" \
   --object-name "$OBJECT_NAME" \
   "$@"

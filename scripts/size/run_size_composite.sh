@@ -78,9 +78,23 @@ if [[ ! -d "$SELECTED_ROOT" ]]; then
   exit 1
 fi
 
+COMPOSITE_SUBDIR="without_composite"
+ANCHORS_ROOT="$SELECTED_ROOT/anchors/$COMPOSITE_SUBDIR"
+MASKS_ROOT="$SELECTED_ROOT/masks/anchors"
+if [[ ! -d "$ANCHORS_ROOT" ]]; then
+  echo "Error: anchors root not found: $ANCHORS_ROOT" >&2
+  exit 1
+fi
+if [[ ! -d "$MASKS_ROOT" ]]; then
+  echo "Error: anchor masks root not found: $MASKS_ROOT" >&2
+  exit 1
+fi
+
 SIZES="${SIZES:-100,90,80,70,60,50,40,30,20,10}"
 
 uv run --extra analysis-perception -- python -m analyse_vit.rare_colour_bias.composite.size_composite \
   --selected-root "$SELECTED_ROOT" \
+  --anchors-root "$ANCHORS_ROOT" \
+  --masks-root "$MASKS_ROOT" \
   --sizes "$SIZES" \
   "$@"

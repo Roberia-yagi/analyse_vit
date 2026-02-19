@@ -66,6 +66,21 @@ def _get_stdout_logger(name: str) -> logging.Logger:
     return logger
 
 
+def _derive_selected_root_from_anchors_root(anchors_root: Path, composite_subdir: str) -> Path:
+    if anchors_root.name != composite_subdir:
+        raise ValueError(
+            "--anchors-root must end with the same composite subdir as --composite-subdir: "
+            f"{anchors_root} vs {composite_subdir}"
+        )
+    anchors_parent = anchors_root.parent
+    if anchors_parent.name != "anchors":
+        raise ValueError(
+            "--anchors-root must follow <selected-root>/anchors/<composite-subdir> when --output-root is omitted: "
+            f"{anchors_root}"
+        )
+    return anchors_parent.parent
+
+
 def _parse_args(argv: Optional[list[str]] = None) -> RecolorConfig:
     parser = argparse.ArgumentParser(description="SAM3 mask + HSV recolor for anchor images (no composite).")
     parser.add_argument("--run-root", default=None, help="Run root (timestamp dir or a single run_* dir).")
@@ -77,7 +92,7 @@ def _parse_args(argv: Optional[list[str]] = None) -> RecolorConfig:
     parser.add_argument(
         "--output-root",
         default=None,
-        help="Structured root to write colour/masks (default: anchors-root/..).",
+        help="Structured selected root to write colour/masks (default: inferred from --anchors-root).",
     )
     parser.add_argument(
         "--composite-subdir",
@@ -137,7 +152,7 @@ def _parse_args(argv: Optional[list[str]] = None) -> RecolorConfig:
         if composite_subdir is None:
             raise ValueError("--composite-subdir is required when using --anchors-root.")
         if output_root is None:
-            output_root = anchors_root.parent
+            output_root = _derive_selected_root_from_anchors_root(anchors_root, composite_subdir)
         run_root = None
     else:
         if not args.run_root:
@@ -455,7 +470,13 @@ def _run_recolor_on_image(
         logger.info("Outputs already exist; skipping SAM prediction: %s", image_path)
         return
 
-    masks_root = config.anchors_root / animal / gen_model / "masks"
+    masks_root = (
+        config.output_root
+        / "masks"
+        / "anchors"
+        / animal
+        / gen_model
+    )
     masks_root.mkdir(parents=True, exist_ok=True)
 
     def _mask_suffix(mask_index: int) -> str:
